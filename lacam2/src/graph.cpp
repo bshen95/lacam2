@@ -4,6 +4,43 @@ Vertex::Vertex(uint _id, uint _index)
     : id(_id), index(_index), neighbor(Vertices())
 {
 }
+void printConfig(const Config& config) {
+  for (const auto& vertex : config) {
+      if (vertex) {
+          std::cout << "Vertex ID: " << vertex->id << ", Index: " << vertex->index << std::endl;
+      } else {
+          std::cout << "Null Vertex" << std::endl;
+      }
+  }
+}
+
+void compareConfigs(const Config& C1, const Config& C2) {
+  if (C1.size() != C2.size()) {
+      std::cout << "Configs have different sizes." << std::endl;
+      return;
+  }
+
+  for (size_t i = 0; i < C1.size(); ++i) {
+      if (C1[i] != C2[i]) {
+          if (C1[i] && C2[i]) {
+              std::cout << "Difference at index " << i << ": "
+                        << "C1 Vertex ID: " << C1[i]->id << ", Index: " << C1[i]->index
+                        << " | C2 Vertex ID: " << C2[i]->id << ", Index: " << C2[i]->index
+                        << std::endl;
+          } else if (C1[i]) {
+              std::cout << "Difference at index " << i << ": "
+                        << "C1 Vertex ID: " << C1[i]->id << ", Index: " << C1[i]->index
+                        << " | C2 Vertex is nullptr"
+                        << std::endl;
+          } else {
+              std::cout << "Difference at index " << i << ": "
+                        << "C1 Vertex is nullptr"
+                        << " | C2 Vertex ID: " << C2[i]->id << ", Index: " << C2[i]->index
+                        << std::endl;
+          }
+      }
+  }
+}
 
 Graph::Graph() : V(Vertices()), width(0), height(0) {}
 Graph::~Graph()

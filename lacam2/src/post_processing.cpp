@@ -1,5 +1,4 @@
 #include "../include/post_processing.hpp"
-
 #include "../include/dist_table.hpp"
 
 bool is_feasible_solution(const Instance& ins, const Solution& solution,
@@ -18,7 +17,7 @@ bool is_feasible_solution(const Instance& ins, const Solution& solution,
     info(1, verbose, "invalid goals");
     return false;
   }
-
+  // std::cout<< solution.size()<< std::endl;
   for (size_t t = 1; t < solution.size(); ++t) {
     for (size_t i = 0; i < ins.N; ++i) {
       auto v_i_from = solution[t - 1][i];
@@ -125,6 +124,9 @@ void print_stats(const int verbose, const Instance& ins,
        ", ub=", ceil((float)sum_of_costs / sum_of_costs_lb), ")",
        "\tsum_of_loss: ", sum_of_loss, " (lb=", sum_of_costs_lb,
        ", ub=", ceil((float)sum_of_loss / sum_of_costs_lb), ")");
+    // info(1, verbose, makespan,",",
+    //    sum_of_costs,",",
+    //     sum_of_loss );
 }
 
 // for log of map_name
