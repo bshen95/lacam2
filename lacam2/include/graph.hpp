@@ -15,7 +15,7 @@ using Vertices = std::vector<Vertex*>;
 using Config = std::vector<Vertex*>;  // a set of locations for all agents
 void printConfig(const Config& config);
 void compareConfigs(const Config& C1, const Config& C2);
-
+std::unordered_map<uint, uint> computeCellFrequency(const Config& config);
 
 struct Graph {
   Vertices V;                          // without nullptr

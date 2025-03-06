@@ -14,6 +14,17 @@ void printConfig(const Config& config) {
   }
 }
 
+std::unordered_map<uint, uint> computeCellFrequency(const Config& config) {
+  std::unordered_map<uint, uint> cellFrequency;
+  for (const auto& vertex : config) {
+      if (vertex) {
+          cellFrequency[vertex->index]++;
+      }
+  }
+  return cellFrequency;
+}
+
+
 void compareConfigs(const Config& C1, const Config& C2) {
   if (C1.size() != C2.size()) {
       std::cout << "Configs have different sizes." << std::endl;

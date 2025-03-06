@@ -598,6 +598,7 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
   uint num_of_goal_hit = 0;
   // std::cout<<"Start sampling: "<< std::endl; 
   double success_times = 0;
+  std::vector<std::vector<std::unordered_map<uint, uint>>> sample_array; 
   while (num_sample > 0){
     HNode* current_sample_node = H;
     max_depth = original_max_depth;
@@ -609,9 +610,10 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
     int simulated_g_value = H->g;
     // set same order here; 
     auto order  = H->order;
-
+    std::vector<std::unordered_map<uint, uint>> agent_to_vertex;
     // std::cout<< "Start sampling: "<< std::endl;
     while (max_depth > 0){
+      agent_to_vertex.push_back(computeCellFrequency(current_sample_node->C));
       // check goal condition
       if (is_same_config(current_sample_node->C, ins->goals)) {
         if( H_goal == nullptr || current_sample_node->f < H_goal->f){
@@ -674,6 +676,7 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
       max_depth --; 
       num_of_depth ++; 
     }
+    sample_array.push_back(agent_to_vertex);
     // std::cout<< "Finish sampling: " << num_of_depth<< std::endl; 
     // std::cout<< " "<< std::endl; 
     // std::cout<< " "<< std::endl; 
@@ -687,6 +690,28 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
     num_sample --;
   }
 
+  for ( int i = 0 ; i < 9 ; i ++){
+    for ( int j = i+1 ; j < 9 ; j ++){
+    for( int t = 1; t < 2 ; t ++){
+            const auto& map1 = sample_array[i][t];
+            const auto& map2 = sample_array[j][t];
+            int num_of_diff = 0;
+            for (const auto& entry : map1) {
+                uint cell_index = entry.first;
+                uint freq1 = entry.second;
+                uint freq2 = map2.count(cell_index) ? map2.at(cell_index) : 0;
+                if (freq1 != freq2) {
+                    num_of_diff ++;
+                } 
+                // if (freq1 != freq2) {
+                //     std::cout << "Cell Index: " << cell_index << ", Frequency in map " << i << ": " << freq1 << ", Frequency in map " << i+1 << ": " << freq2 << "\n";
+                // }
+            }
+            std::cout << "Number of different cells between map " << i << " and map " << j << ": " << num_of_diff << "\n";
+            std::cout << "time step"<< t  << "\n";
+          }
+    }
+  }
 
   // std::cout<< "Finish all sampling........... " <<std::endl; 
   // std::cout<< " "<< std::endl; 
