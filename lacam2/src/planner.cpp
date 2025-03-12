@@ -238,12 +238,13 @@ Solution Planner::solve(std::string& additional_info)
 
 
 
-void Planner::MCT_backpropagate(MCTNode* mct_node, double reward){
-  mct_node->visits +=1 ;
+void Planner::MCT_backpropagate(MCTNode* mct_node, int sample_times,  double reward, int failuare_times){
+  mct_node->visits += sample_times;
+  mct_node->failuare_times += failuare_times;
   mct_node->reward += reward;
   if(mct_node->parent != nullptr )
   {
-    MCT_backpropagate(mct_node->parent, reward );
+    MCT_backpropagate(mct_node->parent, sample_times, reward, failuare_times);
   }
 }
 
@@ -251,13 +252,10 @@ void Planner::MCT_backpropagate(MCTNode* mct_node, double reward){
 MCTNode* Planner::MCT_selection(std::vector<MCTNode*>& node_pool, HNode* goal_node){
   MCTNode* selected_node = nullptr; 
   double max_utc_value = -std::numeric_limits<double>::infinity();
-  // if(goal_node == nullptr){
-  //   return  node_pool[node_pool.size()-1];
-  // }
   for(auto node : node_pool){
     if(!node->completed_node){
       // std::cout<<"Node ID: "<< node->node_id <<" ";
-      double UCT_value = node->compute_uct_value(goal_node);
+      double UCT_value = compute_uct_value(node);
       if(max_utc_value <= UCT_value){
         selected_node = node; 
         max_utc_value = UCT_value;
@@ -268,25 +266,47 @@ MCTNode* Planner::MCT_selection(std::vector<MCTNode*>& node_pool, HNode* goal_no
   return selected_node;
 }
 
-void Planner::print_utc_value(std::vector<MCTNode*>& node_pool, HNode* goal_node){
-  MCTNode* selected_node = nullptr; 
-  double max_utc_value = -std::numeric_limits<double>::infinity();
-  // if(goal_node == nullptr){
-  //   return  node_pool[node_pool.size()-1];
-  // }
-    std::cout<< "   node_selection:" <<std::endl;
-  
-  for(auto node : node_pool){
-    if(!node->completed_node){
-      // std::cout<<"Node ID: "<< node->node_id <<" ";
-      double UCT_value = node->compute_uct_value(goal_node);
-      std::cout<< "    - "<< "node_id: "<< node->node_id<<std::endl;
-      node->print_uct_value(goal_node);
-      if(max_utc_value <= UCT_value){
-        selected_node = node; 
-        max_utc_value = UCT_value;
-      }
+double Planner::compute_uct_value(MCTNode* mcts_node){
+  double uct_value = 0;
+  if(mcts_node->visits == 0){
+    uct_value = std::numeric_limits<double>::infinity();
+  } else {
+    double parent_visit  =   mcts_node->parent == nullptr ? mcts_node->visits : mcts_node->parent->visits;
+    //we use f-value lower the better.
+    // set failuare cases with maximal_f_value;
+    double exploitation = 1 - minMaxStats.normalize( (mcts_node->reward + mcts_node->failuare_times * minMaxStats.get_maximum() ) / mcts_node->visits); 
+    double exploration = C  * std::sqrt(std::log(parent_visit) / mcts_node->visits);
+    uct_value = exploitation + exploration;
+  }
+  return uct_value;
+}
+
+
+
+void Planner::print_utc_value(std::vector<MCTNode*>& node_pool){
+  std::cout<< "   node_selection:" <<std::endl;
+  for(auto mcts_node : node_pool){
+    double uct_value = 0;
+    double exploitation = 0;
+    double exploration = 0;
+    if(mcts_node->visits == 0){
+      uct_value = std::numeric_limits<double>::infinity();
+      exploitation = std::numeric_limits<double>::infinity();
+      exploration = std::numeric_limits<double>::infinity();
+    } else {
+      double parent_visit  =   mcts_node->parent == nullptr ? mcts_node->visits : mcts_node->parent->visits;
+      //we use f-value lower the better.
+      // set failuare cases with maximal_f_value;
+      exploitation = 1 - minMaxStats.normalize( (mcts_node->reward + mcts_node->failuare_times * minMaxStats.get_maximum() ) / mcts_node->visits); 
+      exploration = C  * std::sqrt(std::log(parent_visit) / mcts_node->visits);
+      uct_value = exploitation + exploration;
     }
+    std::cout<< "    - "<< "node_id: "<< mcts_node->node_id<<std::endl;
+      // std::cout<< "Exploitation Score: " << exploitation << "; Exploration Score: "<< exploration << "; UTC value: "<<exploitation + exploration <<std::endl;
+    std::cout<< "      "<< "reward value: "<< mcts_node->reward <<std::endl;
+    std::cout<< "      "<< "exploitation: "<< exploitation <<std::endl;
+    std::cout<< "      "<< "exploration: "<< exploration <<std::endl;
+    std::cout<< "      "<< "utc value: "<< exploitation + exploration <<std::endl;
   }
 }
 
@@ -305,8 +325,9 @@ Solution Planner::MCT_solve(std::string& additional_info)
   uint MCT_node_id = 1 ;
   auto MCT_init = new MCTNode(nullptr,H_init,MCT_node_id);
   uint roll_out_cnt =  2 * get_makespan_lower_bound(ins->starts);
-  MCT_node_id ++; 
 
+  minMaxStats = MinMaxStats();
+  MCT_node_id ++; 
   H_init->setMakeSpan(0);
   OPEN.push_back(MCT_init);
   EXPLORED[H_init->C] = H_init;
@@ -319,11 +340,63 @@ Solution Planner::MCT_solve(std::string& additional_info)
     std::cout<< "version: 1.4.0\n";
     std::cout<< "events:\n";
   }
+  
+
+  if(verbose == -1){
+    std::cout<< " - type: expanding" <<std::endl;
+    std::cout<< "   id: "<< MCT_init->node_id <<std::endl;
+    std::cout<< "   pId: " 
+          << (MCT_init->parent == nullptr ? "null" : std::to_string(MCT_init->parent->node_id)) 
+          << std::endl;
+    std::cout<< "   visits: "<< MCT_init->visits<<std::endl;
+    std::cout<< "   reward: "<< MCT_init->reward <<std::endl;
+    print_utc_value(OPEN);
+  }
+  // for the sake of MCTS, let's force the root not have k branch factors.
+  int root_branch = 10; 
+  while(root_branch > 0){
+    //force generate k branch factors, hopefully it will not repeate.
+    auto order  = H_init->order;
+    std::shuffle(order.begin(), order.end(), *MT);
+    const auto res = get_next_configuration_rollout(H_init->C,  order, nullptr);
+    if (!res) {
+      continue;
+    } 
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      continue;
+    }else{
+      const auto H_new = new HNode(
+        C_new, D, H_init, H_init->g + get_edge_cost(H_init->C, C_new), get_h_value(C_new));
+  
+      const auto MCT_new = new MCTNode(MCT_init,H_new,MCT_node_id);
+      auto results = downward_rollout_policy(H_new, H_goal, EXPLORED, 1, 1.2*(roll_out_cnt - H_new->current_make_span));
+      MCT_backpropagate(MCT_new,rollout_times,results.first,results.second);
+      MCT_node_id ++;
+      OPEN.push_back(MCT_new);
+
+      if(verbose == -1){
+        std::cout<< " - type: generating" <<std::endl;
+        std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+        std::cout<< "   pId: " 
+          << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+          << std::endl;
+        std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+        std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      }
+    }
+    root_branch --; 
+  }
+
+
+
 
   while (!is_expired(deadline)) {
     if(H_goal != nullptr){
       roll_out_cnt = H_goal->current_make_span;
-      // std::cout<<  H_goal->current_make_span<< std::endl;
     }
     loop_cnt += 1;
 
@@ -340,7 +413,7 @@ Solution Planner::MCT_solve(std::string& additional_info)
             << std::endl;
       std::cout<< "   visits: "<< MCT_NODE->visits<<std::endl;
       std::cout<< "   reward: "<< MCT_NODE->reward <<std::endl;
-      print_utc_value(OPEN,H_goal);
+      print_utc_value(OPEN);
     }
     // std::cout << "Selecting node with ID: " << MCT_NODE->node_id << " ;" <<std::endl;
     auto H  = MCT_NODE->hNode; 
@@ -382,24 +455,14 @@ Solution Planner::MCT_solve(std::string& additional_info)
       const auto res = get_new_config(H, L);
       delete L;  // free
       if (!res) {
-        MCT_backpropagate(MCT_NODE,0);
+        // set sample failed.
+        MCT_backpropagate(MCT_NODE,1,0,1);
         k --; 
         continue;
       } 
 
       // create new configuration
       for (auto a : A) C_new[a->id] = a->v_next;
-
-      // for (size_t i = 0; i < N; ++i) {
-      //   auto v_i_from = H->C[i];
-      //   auto v_i_to = C_new[i];
-      //   // check connectivity
-      //   if (v_i_from != v_i_to &&
-      //       std::find(v_i_to->neighbor.begin(), v_i_to->neighbor.end(),
-      //                 v_i_from) == v_i_to->neighbor.end()) {
-      //     std::cout<< "wrong generated !!!" <<std::endl;
-      //   }
-      // }
 
       // check explored list
       const auto iter = EXPLORED.find(C_new);
@@ -412,9 +475,9 @@ Solution Planner::MCT_solve(std::string& additional_info)
             iter->second ->setMakeSpan(H->current_make_span + 1);
           }
           const auto MCT_new = new MCTNode(MCT_NODE,H_new,MCT_node_id);
-          double reward = downward_rollout_policy(H_new, H_goal, EXPLORED, 10, 1.2*(roll_out_cnt - H_new->current_make_span));
+          auto results = downward_rollout_policy(H_new, H_goal, EXPLORED, 1, 1.2*(roll_out_cnt - H_new->current_make_span));
           sampleing_times += roll_out_cnt - H_new->current_make_span;
-          MCT_backpropagate(MCT_new,reward);
+          MCT_backpropagate(MCT_new,rollout_times,results.first,results.second);
           MCT_node_id ++;
           OPEN.push_back(MCT_new);
           if(verbose == -1){
@@ -427,7 +490,7 @@ Solution Planner::MCT_solve(std::string& additional_info)
             std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
           }
         } else{
-          MCT_backpropagate(MCT_NODE,0);
+          MCT_backpropagate(MCT_NODE,1,0,1);
         }
         // do a no insert roll out; 
       } else {
@@ -438,10 +501,9 @@ Solution Planner::MCT_solve(std::string& additional_info)
         EXPLORED[H_new->C] = H_new;
         if (H_goal == nullptr || H_new->f < H_goal->f){
           const auto MCT_new = new MCTNode(MCT_NODE,H_new,MCT_node_id);
-          double reward = downward_rollout_policy(H_new, H_goal, EXPLORED, 10, 1.2*(roll_out_cnt - H_new->current_make_span));
-          // std::cout<< roll_out_cnt << std::endl;
+          auto results = downward_rollout_policy(H_new, H_goal, EXPLORED, 1, 1.2*(roll_out_cnt - H_new->current_make_span));
           sampleing_times += roll_out_cnt - H_new->current_make_span;
-          MCT_backpropagate(MCT_new,reward);
+          MCT_backpropagate(MCT_new,rollout_times,results.first,results.second);
           MCT_node_id ++;
           OPEN.push_back(MCT_new);
           if(verbose == -1 ){
@@ -454,7 +516,8 @@ Solution Planner::MCT_solve(std::string& additional_info)
             std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
           }
         }else{
-          MCT_backpropagate(MCT_NODE,0);
+          // record sample failed.
+          MCT_backpropagate(MCT_NODE,1,0,1);
         }
       }
       k --;
@@ -588,17 +651,14 @@ void Planner::rewrite_rollout(HNode* H_from, HNode* H_to, HNode* H_goal)
   }
 }
 
-
-double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED,  int num_sample, int max_depth){
-  // std::cout<< "Miximual depth: "<< max_depth << std::endl; 
-  // max_depth =150;
+std::pair<double,int> Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED,  int num_sample, int max_depth){
+  // return reward and failure times ;
+  // let's return the f-value as reward ! and normolize outside. 
   int original_sample = num_sample;
   int original_max_depth = max_depth;
   double total_sum_of_f_value = 0;
-  uint num_of_goal_hit = 0;
-  // std::cout<<"Start sampling: "<< std::endl; 
-  double success_times = 0;
-  std::vector<std::vector<std::unordered_map<uint, uint>>> sample_array; 
+  int success_times = 0;
+  // std::vector<std::vector<std::unordered_map<uint, uint>>> sample_array; 
   while (num_sample > 0){
     HNode* current_sample_node = H;
     max_depth = original_max_depth;
@@ -610,17 +670,16 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
     int simulated_g_value = H->g;
     // set same order here; 
     auto order  = H->order;
-    std::vector<std::unordered_map<uint, uint>> agent_to_vertex;
+    // std::vector<std::unordered_map<uint, uint>> agent_to_vertex;
     // std::cout<< "Start sampling: "<< std::endl;
     while (max_depth > 0){
-      agent_to_vertex.push_back(computeCellFrequency(current_sample_node->C));
+      // agent_to_vertex.push_back(computeCellFrequency(current_sample_node->C));
       // check goal condition
       if (is_same_config(current_sample_node->C, ins->goals)) {
         if( H_goal == nullptr || current_sample_node->f < H_goal->f){
           solver_info(1, "rollout-found solution, cost: ", current_sample_node->g);
           H_goal = current_sample_node;
         }
-        num_of_goal_hit++;
         break;
       }
       // create successors at the high-level search
@@ -646,13 +705,6 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
       auto C_new = Config(N, nullptr);  
       for (auto a : A) C_new[a->id] = a->v_next;
 
-      // if(is_same_config(current_sample_node->C, C_new)){
-      //   std::shuffle(order.begin(), order.end(), *MT);
-      //   num_of_depth ++; 
-      //   max_depth --;
-      //   continue;
-      // }
-      // check explored list
       const auto iter = EXPLORED.find(C_new);
       if (iter != EXPLORED.end()) {
         // std::cout<< "found existing node" << std::endl;
@@ -670,90 +722,227 @@ double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered
             C_new, D, current_sample_node, current_sample_node->g + get_edge_cost(current_sample_node->C, C_new), get_h_value(C_new));
         H_new ->setMakeSpan(current_sample_node->current_make_span + 1);
         EXPLORED[H_new->C] = H_new;
-        current_sample_node = H_new;
         simulated_g_value = simulated_g_value + get_edge_cost(current_sample_node->C, C_new);
+        current_sample_node = H_new;
       }
       max_depth --; 
       num_of_depth ++; 
     }
-    sample_array.push_back(agent_to_vertex);
-    // std::cout<< "Finish sampling: " << num_of_depth<< std::endl; 
-    // std::cout<< " "<< std::endl; 
-    // std::cout<< " "<< std::endl; 
-    // std::cout<< " "<< std::endl; 
-    // std::cout<< " "<< std::endl; 
-
     if(sample_success){
-      success_times ++;
+      // update the reward !!!
+      minMaxStats.update(simulated_g_value + current_sample_node->h);
       total_sum_of_f_value += simulated_g_value + current_sample_node->h;
+      success_times++;
     }
     num_sample --;
   }
-
-  for ( int i = 0 ; i < 9 ; i ++){
-    for ( int j = i+1 ; j < 9 ; j ++){
-    for( int t = 1; t < 2 ; t ++){
-            const auto& map1 = sample_array[i][t];
-            const auto& map2 = sample_array[j][t];
-            int num_of_diff = 0;
-            for (const auto& entry : map1) {
-                uint cell_index = entry.first;
-                uint freq1 = entry.second;
-                uint freq2 = map2.count(cell_index) ? map2.at(cell_index) : 0;
-                if (freq1 != freq2) {
-                    num_of_diff ++;
-                } 
-                // if (freq1 != freq2) {
-                //     std::cout << "Cell Index: " << cell_index << ", Frequency in map " << i << ": " << freq1 << ", Frequency in map " << i+1 << ": " << freq2 << "\n";
-                // }
-            }
-            std::cout << "Number of different cells between map " << i << " and map " << j << ": " << num_of_diff << "\n";
-            std::cout << "time step"<< t  << "\n";
-          }
-    }
-  }
-
-  // std::cout<< "Finish all sampling........... " <<std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // std::cout<< " "<< std::endl; 
-  // double f_value_ratio = 1 - total_sum_of_f_value / original_sample / max_f_value ;
-  // double f_value_ratio = 1 - total_sum_of_f_value / original_sample /  max_improvement ;
-  // std::cout<<(double)(min_f_value) <<std::endl;
-  double f_value_ratio = 1 - total_sum_of_f_value / success_times / (N * get_makespan_lower_bound(ins->starts));
-  if(H_goal != nullptr){
-    if(success_times == 0){
-      f_value_ratio = 0 ;
-    }else{
-      f_value_ratio = 1 - total_sum_of_f_value / success_times / H_goal->f;
-    }
-  }
-  double success_ratio = success_times / original_sample;
-
-  // double ratio = (H_goal->f - H->g) / (total_sum_of_f_value / original_sample - H->g);
-  // std::cout<< ratio << std::endl;
-  // std::cout<< (H_goal->f - H->g) << std::endl;
-  // std::cout<< total_sum_of_f_value / original_sample << std::endl;
-
-  // std::cout <<" success_ratio: " << success_ratio << " f_value_ratio: "<< f_value_ratio << std::endl;
-  // double reward = std::max((closeness_ratio + congestion_ratio + f_value_ratio)/3, goal_hit_ratio);
-  // double reward = ( (closeness_ratio + congestion_ratio + f_value_ratio)/3 + goal_hit_ratio ) / 2 ;
-  double reward =  success_ratio + f_value_ratio;
-  //  + g_increase_ratio;
-  // std::cout<<"reward value: " << 2 * success_ratio + 2 * goal_ratio + g_ratio <<"  "<< std::endl;
-
-  // std::cout<<"Finishing sampling.       "<< std::endl; 
-  // std::cout<<"Reward: "<< reward<< std::endl; 
-  // std::cout<<"                          "<< std::endl; 
-  // std::cout<<"                          "<< std::endl; 
-
-  return reward;
+  return std::make_pair(total_sum_of_f_value/original_sample, original_sample - success_times);
 }
+
+// double Planner::downward_rollout_policy(HNode* H, HNode*& H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED,  int num_sample, int max_depth){
+//   // std::cout<< "Miximual depth: "<< max_depth << std::endl; 
+//   // max_depth =150;
+//   int original_sample = num_sample;
+//   int original_max_depth = max_depth;
+//   double total_sum_of_f_value = 0;
+//   uint num_of_goal_hit = 0;
+//   // std::cout<<"Start sampling: "<< std::endl; 
+//   double success_times = 0;
+//   double sampled_f_value = 0;
+//   double sum_of_f_ratio = 0;
+//   double current_best_f_value = H_goal == nullptr ? N * get_makespan_lower_bound(ins->starts) : H_goal->f;
+//   // std::vector<std::vector<std::unordered_map<uint, uint>>> sample_array; 
+//   while (num_sample > 0){
+//     HNode* current_sample_node = H;
+//     max_depth = original_max_depth;
+//     int num_of_failure = 0;
+//     int num_of_depth = 0; 
+//     bool sample_success = true;
+//     // this varaible is used to record the g value of the node that is simulated;
+//     // in case find existing node;
+//     int simulated_g_value = H->g;
+//     // set same order here; 
+//     auto order  = H->order;
+//     // std::vector<std::unordered_map<uint, uint>> agent_to_vertex;
+//     // std::cout<< "Start sampling: "<< std::endl;
+//     while (max_depth > 0){
+//       // agent_to_vertex.push_back(computeCellFrequency(current_sample_node->C));
+//       // check goal condition
+//       if (is_same_config(current_sample_node->C, ins->goals)) {
+//         if( H_goal == nullptr || current_sample_node->f < H_goal->f){
+//           solver_info(1, "rollout-found solution, cost: ", current_sample_node->g);
+//           H_goal = current_sample_node;
+//         }
+//         num_of_goal_hit++;
+//         break;
+//       }
+//       // create successors at the high-level search
+//       LNode* L = nullptr;
+//       if(current_sample_node == H){
+//         // only pop dont expand; 
+//         // add constraint if it is first node;
+//         L = H->search_tree.front();
+//       }
+//       //copy order for now: 
+//       // shuffle order to sampling; 
+//       std::shuffle(order.begin(), order.end(), *MT);
+//       const auto res =  get_next_configuration_rollout(current_sample_node->C,order,L);
+//       if (!res) {
+//         // config generated failed. Assume waste one depth.
+//         // std::cout<< "Sample Failed" << std::endl;
+//         sample_success = false;
+//         break;
+//       }
+//       // std::cout<< *current_sample_node << std::endl;
+    
+//       // create new configuration
+//       auto C_new = Config(N, nullptr);  
+//       for (auto a : A) C_new[a->id] = a->v_next;
+
+//       // if(is_same_config(current_sample_node->C, C_new)){
+//       //   std::shuffle(order.begin(), order.end(), *MT);
+//       //   num_of_depth ++; 
+//       //   max_depth --;
+//       //   continue;
+//       // }
+//       // check explored list
+//       const auto iter = EXPLORED.find(C_new);
+//       if (iter != EXPLORED.end()) {
+//         // std::cout<< "found existing node" << std::endl;
+//         if (iter->second->g  > current_sample_node->g + get_edge_cost(current_sample_node->C, C_new) ) {
+//           rewrite_rollout(current_sample_node, iter->second, H_goal);
+//           if(current_sample_node->current_make_span + 1 < iter->second->current_make_span){
+//             iter->second ->setMakeSpan(current_sample_node->current_make_span + 1);
+//           }
+//         }
+//         simulated_g_value = simulated_g_value + get_edge_cost(current_sample_node->C, C_new);
+//         current_sample_node = iter->second;
+//       } else {
+//         // insert new search node
+//         const auto H_new = new HNode(
+//             C_new, D, current_sample_node, current_sample_node->g + get_edge_cost(current_sample_node->C, C_new), get_h_value(C_new));
+//         H_new ->setMakeSpan(current_sample_node->current_make_span + 1);
+//         EXPLORED[H_new->C] = H_new;
+//         current_sample_node = H_new;
+//         simulated_g_value = simulated_g_value + get_edge_cost(current_sample_node->C, C_new);
+//       }
+//       max_depth --; 
+//       num_of_depth ++; 
+//     }
+//     // sample_array.push_back(agent_to_vertex);
+//     // std::cout<< "Finish sampling: " << num_of_depth<< std::endl; 
+//     // std::cout<< " "<< std::endl; 
+//     // std::cout<< " "<< std::endl; 
+//     // std::cout<< " "<< std::endl; 
+//     // std::cout<< " "<< std::endl; 
+
+//     if(sample_success){
+//       sum_of_f_ratio += 1 - (simulated_g_value + current_sample_node->h)/ current_best_f_value;
+//       // std::cout<< "f-value: "<< simulated_g_value + current_sample_node->h << std::endl;
+//       // std::cout<< "max-f-value: "<< current_best_f_value << std::endl;
+//       // std::cout<< "f-value raito:" << std::max(1 - (simulated_g_value + current_sample_node->h)/ current_best_f_value, 0.0) << std::endl;
+//     }
+//     num_sample --;
+//   }
+
+//   // for ( int i = 0 ; i < 9 ; i ++){
+//   //   for ( int j = i+1 ; j < 9 ; j ++){
+//   //     for( int t = 0; t < 60 ; t ++){
+//   //         const auto& map1 = sample_array[i][t];
+//   //         const auto& map2 = sample_array[j][t];
+//   //         // std::cout<<"  - type: event"<<std::endl;
+//   //         // std::cout<<"    agents:"<<std::endl;
+//   //         // for(auto entry: map1){
+//   //         //   uint cell_index = entry.first;
+//   //         //   uint x = cell_index % 32;
+//   //         //   uint y = cell_index / 32;
+//   //         //   std::cout<<"      - x: "<< x<<std::endl;
+//   //         //   std::cout<<"        y: "<< y<<std::endl;
+//   //         // }
+//   //         // bool a = 0;
+
+//   //                   std::cout<<"  - type: event"<<std::endl;
+//   //         std::cout<<"    agents:"<<std::endl;
+//   //         for(auto entry: map2){
+//   //           uint cell_index = entry.first;
+//   //           uint x = cell_index % 32;
+//   //           uint y = cell_index / 32;
+//   //           std::cout<<"      - x: "<< x<<std::endl;
+//   //           std::cout<<"        y: "<< y<<std::endl;
+//   //         }
+//   //         bool b = 0;
+//   //       }
+//   //       return 0;
+//   //     }
+
+
+//   // }
+
+//   // for ( int i = 0 ; i < 9 ; i ++){
+//   //   for ( int j = i+1 ; j < 9 ; j ++){
+//   //   for( int t = 1; t < 2 ; t ++){
+//   //           const auto& map1 = sample_array[i][t];
+//   //           const auto& map2 = sample_array[j][t];
+//   //           int num_of_diff = 0;
+//   //           for (const auto& entry : map1) {
+//   //               uint cell_index = entry.first;
+//   //               uint freq1 = entry.second;
+//   //               uint freq2 = map2.count(cell_index) ? map2.at(cell_index) : 0;
+//   //               if (freq1 != freq2) {
+//   //                   num_of_diff ++;
+//   //               } 
+//   //               // if (freq1 != freq2) {
+//   //               //     std::cout << "Cell Index: " << cell_index << ", Frequency in map " << i << ": " << freq1 << ", Frequency in map " << i+1 << ": " << freq2 << "\n";
+//   //               // }
+//   //           }
+//   //           std::cout << "Number of different cells between map " << i << " and map " << j << ": " << num_of_diff << "\n";
+//   //           std::cout << "time step"<< t  << "\n";
+//   //         }
+//   //   }
+//   // }
+
+//   // std::cout<< "Finish all sampling........... " <<std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // std::cout<< " "<< std::endl; 
+//   // double f_value_ratio = 1 - total_sum_of_f_value / original_sample / max_f_value ;
+//   // double f_value_ratio = 1 - total_sum_of_f_value / original_sample /  max_improvement ;
+//   // std::cout<<(double)(min_f_value) <<std::endl;
+//   // double f_value_ratio = 1 - total_sum_of_f_value / success_times / (N * get_makespan_lower_bound(ins->starts));
+//   // if(H_goal != nullptr){
+//   //   if(success_times == 0){
+//   //     f_value_ratio = 0 ;
+//   //   }else{
+//   //     f_value_ratio = 1 - total_sum_of_f_value / success_times / H_goal->f;
+//   //   }
+//   // }
+
+//   // double ratio = (H_goal->f - H->g) / (total_sum_of_f_value / original_sample - H->g);
+//   // std::cout<< ratio << std::endl;
+//   // std::cout<< (H_goal->f - H->g) << std::endl;
+//   // std::cout<< total_sum_of_f_value / original_sample << std::endl;
+
+//   // std::cout <<" success_ratio: " << success_ratio << " f_value_ratio: "<< f_value_ratio << std::endl;
+//   // double reward = std::max((closeness_ratio + congestion_ratio + f_value_ratio)/3, goal_hit_ratio);
+//   // double reward = ( (closeness_ratio + congestion_ratio + f_value_ratio)/3 + goal_hit_ratio ) / 2 ;
+//   double reward =  sum_of_f_ratio;
+//   // double reward =   sum_of_f_ratio / original_sample;
+//   // std::cout<<"reward value: " << 2 * success_ratio + 2 * goal_ratio + g_ratio <<"  "<< std::endl;
+//   //  + g_increase_ratio;
+//   // std::cout<<"reward value: " << 2 * success_ratio + 2 * goal_ratio + g_ratio <<"  "<< std::endl;
+
+//   // std::cout<<"Finishing sampling.       "<< std::endl; 
+//   // std::cout<<"Reward: "<< reward<< std::endl; 
+//   // std::cout<<"                          "<< std::endl; 
+//   // std::cout<<"                          "<< std::endl; 
+
+//   return reward;
+// }
 
 
 // int Planner::get_rollout_increase(){
