@@ -1,4 +1,5 @@
 #include "../include/planner.hpp"
+#include <unordered_set>
 
 LNode::LNode(LNode* parent, uint i, Vertex* v)
     : who(), where(), depth(parent == nullptr ? 0 : parent->depth + 1)
@@ -44,6 +45,7 @@ HNode::HNode(const Config& _C, DistTable& D, HNode* _parent, const uint _g,
     // for (uint i = 0; i < N; ++i) priorities[i] = dis(gen);
   } else {
     // dynamic priorities, akin to PIBT
+
     for (size_t i = 0; i < N; ++i) {
       if (D.get(i, C[i]) != 0) {
         priorities[i] = parent->priorities[i] + 1;
@@ -51,9 +53,11 @@ HNode::HNode(const Config& _C, DistTable& D, HNode* _parent, const uint _g,
         priorities[i] = parent->priorities[i] - (int)parent->priorities[i];
       }
     }
+
+    
   }
 
-  // set order
+  //set order
   std::iota(order.begin(), order.end(), 0);
   std::sort(order.begin(), order.end(),
             [&](uint i, uint j) { return priorities[i] > priorities[j]; });
@@ -76,6 +80,11 @@ MCTNode::MCTNode(MCTNode* _parent, HNode* _HNode, uint _node_id):
 {};
 
 
+MCTNode::~MCTNode()
+{
+  delete hNode;
+}
+
 Planner::Planner(const Instance* _ins, const Deadline* _deadline,
                  std::mt19937* _MT, const int _verbose,
                  const Objective _objective, const float _restart_rate, const std::string save_tree_file)
@@ -88,17 +97,747 @@ Planner::Planner(const Instance* _ins, const Deadline* _deadline,
       N(ins->N),
       V_size(ins->G.size()),
       D(DistTable(ins)),
+      PIBT_D(AstarDistTable(ins)),
       loop_cnt(0),
       C_next(N),
       tie_breakers(V_size, 0),
       A(N, nullptr),
       occupied_now(V_size, nullptr),
       occupied_next(V_size, nullptr),
-      tree_file(save_tree_file)
+      tree_file(save_tree_file),
+      individual_transition_frequency(N)
 {
 }
 
 Planner::~Planner() {}
+
+
+void Planner::propagate_order_to_neighbors(HNode* current_node) {
+  // Iterate through all neighbors of the current node
+  for (auto neighbor : current_node->neighbor) {
+    // Update the neighbor's order based on the current node's order
+    if(neighbor->order_updated != order_updated_times){
+      neighbor->set_priority_and_order(current_node->order);
+      neighbor->reordering(N, D);
+      while (!neighbor->search_tree.empty()) {
+        delete neighbor->search_tree.front();
+        neighbor->search_tree.pop();
+      }
+      neighbor->search_tree.push(new LNode());
+
+      neighbor->order_updated = order_updated_times;
+      propagate_order_to_neighbors(neighbor);
+
+    }
+  }
+}
+
+
+void Planner::backpropagate_order(HNode* input_H_goal) {
+  // return;
+  order_updated_times ++;
+  std::vector<double> agent_cost(N, 0);
+  std::vector<double> agent_ratio(N, 0);
+  HNode* current = input_H_goal;
+  current->order_updated = order_updated_times;
+
+  // while (current->parent != nullptr) {
+  //   current->order_updated = order_updated_times;
+  //   current = current->parent;
+  // }
+
+  current = input_H_goal;
+  while (current->parent != nullptr) {
+    get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
+    SOLUTION_NODES = std::vector<HNode*>();
+    SOLUTION_NODES.push_back(current);
+
+    for (uint i = 0; i < N; ++i) {
+      if( D.get(i,current->parent->C[i]) == 0){
+        // a large number 
+        agent_ratio[i] = 10000;
+      }else{
+        agent_ratio[i] = agent_cost[i] / (D.get(i, current->parent->C[i]) -
+                                          D.get(i, input_H_goal->C[i]));
+      }
+    }
+
+    // std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+    // for (size_t i = 0; i < agent_ratio.size(); ++i) {
+    //     agent_ratio[i] = agent_ratio[i] * (1 + noise_dist(*MT));
+    // }
+    std::sort(current->parent->order.begin(),current->parent->order.end(), [&](uint i, uint j) {
+        return (agent_ratio[i] ) < (agent_ratio[j]);
+    });
+
+    // for(auto o :current->parent->order){
+    //   std::cout<< o << " ";
+    // }
+    // std::cout<< std::endl;
+
+    // fix order for partent: 
+    current->parent->set_priority_and_order(current->parent->order);
+    current->parent->reordering(N,D);
+    while (!current->parent->search_tree.empty()) {
+      delete current->parent->search_tree.front();
+      current->parent->search_tree.pop();
+    }
+    current->parent->search_tree.push(new LNode());
+    current->parent->order_updated = order_updated_times;
+    // TODO: propagate the order to neighbourhood. 
+    propagate_order_to_neighbors(current->parent);
+
+    // if(makespan > start && makespan < end){
+      // update the edge weights
+      // for(int i = 0; i < N; ++i){
+      //   if(current->parent->C[i]->index != current->C[i]->index){
+      //     PIBT_D.increase_edge_weight(current->parent->C[i]->index, current->C[i]->index, 1);
+      //   }
+      // }
+    // }
+
+    current = current->parent;
+    // makespan --;
+  }
+  SOLUTION_NODES.push_back(current);
+  // PIBT_D.reset(ins);
+}
+
+
+void Planner::increase_visited_node(std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED) {
+  // Example usage of PairHash
+  std::unordered_map<std::pair<int, int>, int, PairHash> transition_frequency;
+
+  for (auto n : EXPLORED) {
+    auto current = n.second;
+    for (int i = 0; i < N; ++i) {
+        if(current->parent == nullptr || current->C[i] == nullptr){
+          std::cout<<" OMMMMMM "<<std::endl;
+        }
+        if (current->parent != nullptr) {
+            if (current->C[i]->index != current->parent->C[i]->index) {
+                // Track the transition frequency
+                std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+                transition_frequency[transition]++;
+            }
+        }
+    }
+  }
+
+  std::vector<std::pair<std::pair<int, int>, int>> frequency_vector(transition_frequency.begin(), transition_frequency.end());
+
+    // Sort the vector by frequency in descending order
+  std::sort(frequency_vector.begin(), frequency_vector.end(),
+            [](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
+                return a.second > b.second; // Sort by frequency (value) in descending order
+            });
+
+  // Calculate the number of top elements to select (20% of the total size)
+  size_t top_20_percent_count = static_cast<size_t>(frequency_vector.size() * 0.1);
+
+  // Print the top 20% of pairs
+  
+  for (size_t i = 0; i < top_20_percent_count; ++i) {
+    std::cout<<"Adding traffic to edge: "<< frequency_vector[i].first.first << " " << 
+    frequency_vector[i].first.second << std::endl;
+    const auto& pair = frequency_vector[i].first;
+    PIBT_D.set_edge_weight(pair.first, pair.second, 1);
+  }
+  PIBT_D.reset(ins);
+}
+
+// void Planner::decay_punishment(){
+//   // decay_factor = decay_factor * 0.8;
+//   // std::cout<<"decay_factor: " << decay_factor << std::endl;
+//   // return; 
+//   PIBT_D.clear_traffic();
+//   int max_size =  punishment_vector.size();
+//   int decay_layer = get_random_int(MT, 0 , max_size - 1);
+//   for(auto& pair: punishment_vector[decay_layer]){
+//     pair.second = decay_factor * pair.second;
+//   }
+
+//   for(int i = 0; i < punishment_vector.size(); i++){
+//     for(auto& pair: punishment_vector[i]){
+//       PIBT_D.increase_directed_edge_weight(pair.first.first, pair.first.second,
+//         pair.second);
+//     }
+//   }
+//   PIBT_D.reset(ins);
+// }
+
+
+// void Planner::decay_punishment(){
+//   // decay_factor = decay_factor * 0.8;
+//   // std::cout<<"decay_factor: " << decay_factor << std::endl;
+//   // return; 
+//   PIBT_D.clear_traffic();
+//   for(int i = 0; i< decay_counter; i++){
+//     for(auto& pair: punishment_vector[i]){
+//        PIBT_D.increase_directed_edge_weight(pair.first.first, pair.first.second,
+//         pair.second);
+//     }
+//   }
+//   for(int i = decay_counter; i < punishment_vector.size(); i++){
+//     for(auto& pair: punishment_vector[i]){
+//        PIBT_D.increase_directed_edge_weight(pair.first.first, pair.first.second,
+//         decay_factor * pair.second);
+//     }
+//   }
+//   decay_counter -- ;
+//   if(decay_counter < 0){
+//     decay_counter = punishment_vector.size() - 1;
+//     decay_factor = decay_factor * 0.5;
+//   }
+//   PIBT_D.reset(ins);
+// }
+ 
+
+void Planner::decay_punishment(){
+  // decay_factor = decay_factor * 0.8;
+  // std::cout<<"decay_factor: " << decay_factor << std::endl;
+  // return; 
+  PIBT_D.clear_traffic();
+  for(auto& pair: punishment_vector[punishment_vector.size()-1]){
+    pair.second = 0.5 * pair.second;
+  }
+  for(int i = 0; i < punishment_vector.size(); i++){
+    for(auto& pair: punishment_vector[i]){
+       PIBT_D.increase_edge_weight(pair.first.first, pair.first.second, 
+      pair.second);
+    }
+  }
+  PIBT_D.reset(ins);
+}
+
+
+// void Planner::set_individual_congestion_map(HNode* H_init){
+//   PIBT_D.clear_all_traffic();
+//   for (int i = 0; i < N; i++) {
+//     for(auto & p : individual_transition_frequency[i]){
+//       if (p.first.first == p.first.second) continue;
+//       double result = p.second;
+//       PIBT_D.increase_edge_weight(i, p.first.first, p.first.second,result);
+//     }
+//   }
+//   PIBT_D.reset(ins);
+// }
+
+void Planner::set_individual_congestion_map(HNode* H_init){
+  PIBT_D.clear_all_traffic();
+  for (int i = 0; i < N; i++) {
+    std::unordered_map<std::pair<int, int>, double, PairHash> transition_frequency;
+    for(int j  = 0; j < i; j++){
+      for(auto & frequency :  individual_transition_frequency[H_init->order[j]]){
+        transition_frequency[frequency.first] += frequency.second;
+      }
+    }
+    for(auto& p : transition_frequency){
+      if (p.first.first == p.first.second) continue;
+      auto increased_weight =  p.second;
+      PIBT_D.increase_edge_weight(H_init->order[i], p.first.first, p.first.second, increased_weight);
+    }
+  }
+  PIBT_D.reset(ins);
+  // // std::cout<< "start computing map" << std::endl;
+  // for (int i = 0; i < N; i++) {
+  //   std::unordered_map<std::pair<int, int>, double, PairHash> transition_frequency;
+  //   for(int j  = 0; j < N; j++){
+  //     auto agent = H_init->order[j];
+  //     for(auto & frequency :  individual_transition_frequency[agent]){
+  //       transition_frequency[frequency.first] += frequency.second;
+  //     }
+  //   }
+  //   std::vector<double> vertex_congestion(ins->G.U.size(), 0);
+  //   std::unordered_map<std::pair<int, int>, double, PairHash> contra_flow;
+  //   for (auto p : transition_frequency) {
+  //     if (p.first.first == p.first.second) {
+  //       vertex_congestion[p.first.second] += p.second;
+  //       continue;
+  //     }
+  //     if( transition_frequency.find({p.first.second, p.first.first}) != transition_frequency.end()){
+  //       contra_flow[{std::min(p.first.first, p.first.second), std::max(p.first.first, p.first.second)}] 
+  //       = p.second * transition_frequency[{p.first.second,p.first.first}];
+  //     }
+  //     // Update vertex congestion
+  //     vertex_congestion[p.first.second] += p.second;
+  //   } 
+
+  //   for(unsigned int e = 0; e  < vertex_congestion.size(); e++){
+  //     if(vertex_congestion[e] > 0){
+  //       for(auto f : ins->G.U[e]->neighbor){
+  //         contra_flow[{std::min(f->index,e), std::max(f->index,e)}] += vertex_congestion[e];  
+  //       }
+  //     }
+  //   }
+
+  //   for(auto& p : contra_flow){
+  //     auto increased_weight =  p.second;
+  //     PIBT_D.increase_edge_weight(H_init->order[i],p.first.first, p.first.second, increased_weight);
+  //   }
+  // }
+  // std::cout<< "finish computing map" << std::endl;
+  // PIBT_D.reset(ins);
+}
+
+
+void Planner::record_each_agent_frequency(HNode* input_H_goal){
+  HNode* current = input_H_goal;
+  while (current->parent != nullptr) {
+    for (int i = 0; i < N; ++i) {
+      std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+      individual_transition_frequency[i][transition]++;
+    }
+    current = current->parent;
+  }
+  reset_congestion_map = true;
+}
+
+
+void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
+  // record_each_agent_frequency(input_H_goal);
+  // // // return; 
+  // if(is_goal){
+  // //   increase_each_agent_cost(input_H_goal);
+  // //   // increase_solution_weight(input_H_goal);
+  //   increase_solution_congestion_cost(input_H_goal);
+  // }
+  
+  // std::cout<<"Function called" << std::endl;
+  // if(is_goal){
+  //   PIBT_D.copy_global_data_and_clean_local();
+  // }
+  increase_solution_congestion_cost(input_H_goal);
+  // increase_solution_weight(input_H_goal);
+}
+
+
+
+void Planner::increase_each_agent_cost(HNode* input_H_goal) {
+  std::vector<std::vector<int>> config_c(N); 
+  std::vector<std::vector<std::pair<int, double>>> learned_travel_cost(N); 
+  // Example usage of PairHash
+  HNode* current = input_H_goal;
+  for( int i = 0; i < N; i++){
+    learned_travel_cost[i].push_back({ins->goals[i]->index, 0});
+  } 
+
+  // find cost to go; 
+  while (current->parent != nullptr) {
+    for (int i = 0; i < N; ++i) {
+      config_c[i].push_back(current->C[i]->index);
+      if(current->parent->C[i]->index == ins->goals[i]->index && 
+        learned_travel_cost[i].back().second == 0){
+        // skip if stay at goal; 
+        continue;
+      }
+      if(  learned_travel_cost[i].back().first == current->parent->C[i]->index){
+        // skip if stay at goal; 
+        learned_travel_cost[i].back().second += 1;  
+      }else{
+        learned_travel_cost[i].push_back({current->parent->C[i]->index, learned_travel_cost[i].back().second + 1});
+      }
+    }
+    current = current->parent;
+  }
+
+  for( int i = 0; i < N; i++){
+    for(int j = 0; j < learned_travel_cost[i].size(); j++){
+      if(learned_travel_cost[i][j].first == ins->goals[i]->index){
+        continue;
+      }
+      auto increased_weight =  learned_travel_cost[i][j].second;
+      PIBT_D.update_heuristic_table(ins, i, learned_travel_cost[i][j].first, increased_weight);
+    }
+  } 
+  PIBT_D.reset(ins);
+}
+
+
+
+// void Planner::increase_each_agent_cost(HNode* input_H_goal) {
+//   std::vector<std::pair<int, double>> learned_travel_cost(N); 
+//   // Example usage of PairHash
+//   HNode* current = input_H_goal;
+//   for( int i = 0; i < N; i++){
+//     learned_travel_cost[i].first = current->C[i]->index;
+//     learned_travel_cost[i].second = 0;
+//   } 
+//   while (current->parent != nullptr) {
+//     for (int i = 0; i < N; ++i) {
+//       if(current->parent->C[i]->index == ins->goals[i]->index){
+//         // skip if stay at goal; 
+//         continue;
+//       }
+//       std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+//       individual_transition_frequency[i][transition]++;
+//     }
+//     current = current->parent;
+//   }
+// }
+
+// void Planner::increase_each_agent_cost(HNode* input_H_goal) {
+//   // Example usage of PairHash
+//   HNode* current = input_H_goal;
+//   while (current->parent != nullptr) {
+//     for (int i = 0; i < N; ++i) {
+//       std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+//       individual_transition_frequency[i][transition]++;
+//     }
+//     current = current->parent;
+//   }
+// }
+
+void Planner::increase_solution_congestion_cost(HNode* input_H_goal) {
+  // Example usage of PairHash
+  // double decay = 0.8; 
+  // PIBT_D.decay_local_entries( decay);
+  std::unordered_map<std::pair<int, int>, double, PairHash> transition_frequency;
+  int max_frequent = 0 ;
+  HNode* current = input_H_goal;
+  while (current->parent != nullptr) {
+    for (int i = 0; i < N; ++i) {
+      std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+      transition_frequency[transition]++;
+    }
+    current = current->parent;
+  }
+  std::vector<double> vertex_congestion(ins->G.U.size(), 0);
+  std::unordered_map<std::pair<int, int>, double, PairHash> contra_flow;
+  for (auto p : transition_frequency) {
+    if (p.first.first == p.first.second) {
+      vertex_congestion[p.first.second] += p.second;
+      continue;
+    }
+    if( transition_frequency.find({p.first.second, p.first.first}) != transition_frequency.end()){
+      contra_flow[{std::min(p.first.first, p.first.second), std::max(p.first.first, p.first.second)}] 
+      = p.second * transition_frequency[{p.first.second,p.first.first}];
+    }
+    // Update vertex congestion
+    vertex_congestion[p.first.second] += p.second;
+  } 
+
+  for(unsigned int i = 0; i < vertex_congestion.size(); i++){
+    if(vertex_congestion[i] > 0){
+      for(auto j : ins->G.U[i]->neighbor){
+        contra_flow[{std::min(j->index,i), std::max(j->index,i)}] += vertex_congestion[i];  
+      }
+    }
+  }
+  for(auto& p : contra_flow){
+    auto increased_weight =  p.second;
+    // PIBT_D.increase_edge_weight(p.first.first, p.first.second, increased_weight);
+    PIBT_D.increase_edge_weight(p.first.first, p.first.second, 
+      increased_weight);
+  }
+  // PIBT_D.reset(ins);
+  // for( int i = 0; i < N; i++){
+  //   PIBT_D.test_dijkstra(i,ins);
+  // }
+  // PIBT_D.sum_global_entries();
+  // std::cout<<"Starting printing edge map" << std::endl;
+  // PIBT_D.print_edge_map();
+  // PIBT_D.apply_gaussian_filter();
+  // PIBT_D.apply_gaussian_filter(1, &ins->G);
+  PIBT_D.reset(ins);
+}
+
+
+
+void Planner::increase_solution_weight(HNode* input_H_goal) {
+  // // return;
+  // Example usage of PairHash
+  decay_factor = 0.8;
+  std::unordered_map<std::pair<int, int>, double, PairHash> transition_frequency;
+  int max_frequent = 0 ;
+  HNode* current = input_H_goal;
+  while (current->parent != nullptr) {
+    for (int i = 0; i < N; ++i) {
+      std::pair<int, int> transition = {std::min(current->parent->C[i]->index, current->C[i]->index),
+                                        std::max(current->parent->C[i]->index, current->C[i]->index)};
+      transition_frequency[transition]++;
+    }
+    current = current->parent;
+  }
+  std::vector<std::pair<std::pair<int, int>, double>> traffic_vector; 
+  for(auto & p : transition_frequency){
+    if (p.first.first == p.first.second) {
+      for(auto j : ins->G.U[p.first.first]->neighbor){
+        PIBT_D.increase_edge_weight(p.first.first, j->index, p.second);
+      }
+    }else{
+      PIBT_D.increase_edge_weight(p.first.first, p.first.second,p.second);  
+    }
+  }
+  // punishment_vector.push_back(traffic_vector);
+  // decay_counter = punishment_vector.size() - 1;
+  PIBT_D.reset(ins);
+}
+
+
+void Planner::add_punishment(HNode* input_H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED) {
+  // Example usage of PairHash
+  std::unordered_map<std::pair<int, int>, int, PairHash> transition_frequency;
+
+  for (auto n : EXPLORED) {
+    auto current = n.second;
+    for (int i = 0; i < N; ++i) {
+        if (current->parent != nullptr) {
+            if (current->C[i]->index != current->parent->C[i]->index) {
+                // Track the transition frequency
+                std::pair<int, int> transition = {current->parent->C[i]->index, current->C[i]->index};
+                transition_frequency[transition]++;
+            }
+        }
+    }
+  }
+
+  std::vector<std::pair<std::pair<int, int>, int>> frequency_vector(transition_frequency.begin(), transition_frequency.end());
+
+    // Sort the vector by frequency in descending order
+  std::sort(frequency_vector.begin(), frequency_vector.end(),
+            [](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
+                return a.second > b.second; // Sort by frequency (value) in descending order
+            });
+
+  // Calculate the number of top elements to select (20% of the total size)
+  size_t top_20_percent_count = static_cast<size_t>(frequency_vector.size() * 0.3);
+
+  // Print the top 20% of pairs
+
+  for (size_t i = 0; i < top_20_percent_count; ++i) {
+    const auto& pair = frequency_vector[i].first;
+    PIBT_D.set_edge_weight(pair.first, pair.second, 1);
+  }
+  PIBT_D.reset(ins);
+}
+
+
+
+
+
+void Planner::pick_restart_nodes(std::stack<HNode*>& OPEN){
+  std::uniform_int_distribution<size_t> dist(0, SOLUTION_NODES.size() - 1);
+  size_t random_index = dist(*MT);
+  OPEN = std::stack<HNode*>();
+  OPEN.push(SOLUTION_NODES[random_index]);
+  // for(auto n : SOLUTION_NODES){
+  //   if( n->parent == nullptr){
+  //     OPEN.push(n);
+  //   }
+  // }
+  // bool a = 0 ;
+}
+
+
+
+
+Solution Planner::backpropagate_solve(std::string& additional_info)
+{
+  order_updated_times = 0 ;
+  node_visit_times = 1;
+  uint node_id = 1;
+  // setup agents
+  for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+
+  // setup search
+  auto OPEN = std::stack<HNode*>();
+  auto EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+  SOLUTION_NODES = std::vector<HNode*>();
+  // insert initial node, 'H': high-level node
+  auto H_init = new HNode(ins->starts, D, nullptr, 0, get_h_value(ins->starts));
+  punishment_vector.clear();
+  // highlevel_node_id ++; 
+  // std::cout<< *H_init << std::endl;
+
+  OPEN.push(H_init);
+  EXPLORED[H_init->C] = H_init;
+  H_init->setNodeID(node_id);
+  node_id++;
+  std::vector<Config> solution;
+  auto C_new = Config(N, nullptr);  // for new configuration
+  HNode* H_goal = nullptr;          // to store goal node
+
+  if(verbose == 3){
+    std::cout<< "version: 1.4.0\n";
+    std::cout<< "events:\n";
+  }
+
+  uint restart_cnt = 0;
+  while (!OPEN.empty() && !is_expired(deadline)) {
+    loop_cnt += 1;
+    // if(OPEN.size() == 1){
+    //   // set_individual_congestion_map(H_init);
+    //   if(reset_congestion_map){
+    //     set_individual_congestion_map(H_init);
+    //     reset_congestion_map = false;
+    //   }
+    //   node_visit_times += 1; 
+    // } 
+    // do not pop here!
+    auto H = OPEN.top();  // high-level node
+
+    // low-level search end
+    if (H->search_tree.empty()) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check lower bounds
+    // if (H_goal != nullptr && H->f >= H_goal->f) {
+    //   OPEN.pop();
+    //   continue;
+    // }
+
+
+    if (H_goal != nullptr && is_same_config(H->C, ins->goals)) {
+      if( H->f >= H_goal->f){
+        increase_weight_map(H,false);
+        pick_restart_nodes(OPEN);
+        continue;
+      }
+    }
+
+    if(H_goal != nullptr  && H->f >= H_goal->f){
+      increase_weight_map(H,false);
+      pick_restart_nodes(OPEN);
+      continue;
+    }
+
+
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      H_goal = H;
+      solver_info(1, "main search found solution, cost: ", H->g);
+      if (objective == OBJ_NONE) break;
+      backpropagate_order(H_goal);
+      increase_weight_map(H_goal,true);
+      pick_restart_nodes(OPEN);
+      continue;
+    }
+
+    
+    if(verbose == 3){
+      std::cout<< " - type: expanding" <<std::endl;
+      std::cout<< "   id: "<< H->node_id <<std::endl;
+      std::cout<< "   pId: " 
+            << (H->parent == nullptr ? "0" : std::to_string(H->parent->node_id)) <<std::endl;
+      std::cout<< "   f_value: "<< H->f<<std::endl;
+    }
+    // create successors at the low-level search
+    auto L = H->search_tree.front();
+    H->search_tree.pop();
+    expand_lowlevel_tree(H, L);
+
+
+    // create successors at the high-level search
+    const auto res = get_new_config(H, L);
+    delete L;  // free
+    if (!res) continue;
+
+    // create new configuration
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      // case found
+      // rewrite(H, iter->second, H_goal, OPEN);
+      rewrite_backpropagate(H, iter->second, H_goal, OPEN, H_init,EXPLORED);
+      if(OPEN.size() == 1 ){
+        continue;
+      }
+      // re-insert or random-restart
+      auto H_insert = (MT != nullptr && get_random_float(MT) >= RESTART_RATE)
+                          ? iter->second
+                          : H_init;
+      // if(H_insert == H_init){
+      //   backpropagate_order(H_insert);
+      // }
+      
+      H_insert->set_visit_times(node_visit_times);
+      OPEN.push(H_insert);
+      // if (H_goal == nullptr || H_insert->f < H_goal->f){
+      //   // backpropagate_order(H_insert);
+      //   OPEN.push(H_insert);
+      //   // record_highlevel_node(H_insert,false,false);
+      // }
+    } else {
+      // insert new search node
+      const auto H_new = new HNode(
+          C_new, D, H, H->g + get_edge_cost(H->C, C_new), get_h_value(C_new));
+      H_new->set_visit_times(node_visit_times);
+      EXPLORED[H_new->C] = H_new;
+      H_new->setNodeID(node_id);
+      node_id++;
+      H_new->set_visit_times(node_visit_times);
+      // if (H_goal == nullptr || H_new->f < H_goal->f) 
+      OPEN.push(H_new);
+      if(verbose == 3){
+        std::cout<< " - type: generating" <<std::endl;
+        std::cout<< "   id: "<< H_new->node_id <<std::endl;
+        std::cout<< "   pId: " 
+              << (H_new->parent == nullptr ? "0" : std::to_string(H_new->parent->node_id)) <<std::endl;
+        std::cout<< "   f_value: "<< H_new->f<<std::endl;
+      }
+    }
+  }
+  
+  // backtrack
+  if (H_goal != nullptr) {
+    auto H = H_goal;
+    while (H != nullptr) {
+      solution.push_back(H->C);
+      H = H->parent;
+    }
+    std::reverse(solution.begin(), solution.end());
+  }
+
+
+  // print result
+  if (H_goal != nullptr && OPEN.empty()) {
+    solver_info(1, "solved optimally, objective: ", objective);
+  } else if (H_goal != nullptr) {
+    solver_info(1, "solved sub-optimally, objective: ", objective);
+  } else if (OPEN.empty()) {
+    solver_info(1, "no solution");
+  } else {
+    solver_info(1, "timeout");
+  }
+
+  // logging
+  additional_info +=
+      "optimal=" + std::to_string(H_goal != nullptr && OPEN.empty()) + "\n";
+  additional_info += "objective=" + std::to_string(objective) + "\n";
+  additional_info += "loop_cnt=" + std::to_string(loop_cnt) + "\n";
+  additional_info += "num_node_gen=" + std::to_string(EXPLORED.size()) + "\n";
+
+
+  // save to tree file 
+  if(tree_file != "none"){
+    saveTree(tree_file);
+  }
+
+  // std::cout<< "version: 1.4.0\n";
+  // std::cout<< "events:\n";
+  // for(auto e : EXPLORED){
+  //   std::cout<< " - type: expanding" <<std::endl;
+  //   std::cout<< "   id: "<< e.second->node_id <<std::endl;
+  //   std::cout<< "   pId: " 
+  //         << (e.second->parent == nullptr ? "null" : std::to_string(e.second->parent->node_id)) <<std::endl;
+  //   std::cout<< "   f_value: "<< e.second->f<<std::endl;
+  // }
+
+  // memory management
+  for (auto a : A) delete a;
+  for (auto itr : EXPLORED) delete itr.second;
+
+  return solution;
+}
+
+
+
+
 
 Solution Planner::solve(std::string& additional_info)
 {
@@ -236,7 +975,20 @@ Solution Planner::solve(std::string& additional_info)
   return solution;
 }
 
-
+void Planner::update_ordering(HNode* h_from, HNode* h_to, size_t N, DistTable& D) {
+  // dynamic priorities, akin to PIBT
+  for (size_t i = 0; i < N; ++i) {
+    if (D.get(i, h_to->C[i]) != 0) {
+      h_to->priorities[i] = h_from->priorities[i] + 1;
+    } else {
+      h_to->priorities[i] = h_from->priorities[i] - (int)h_from->priorities[i];
+    }
+  }
+  // set order
+  std::iota(h_to->order.begin(), h_to->order.end(), 0);
+  std::sort(h_to->order.begin(), h_to->order.end(),
+        [&](uint i, uint j) { return h_to->priorities[i] > h_to->priorities[j]; });
+}
 
 void Planner::MCT_backpropagate(MCTNode* mct_node, int sample_times,  double reward, int failuare_times){
   mct_node->visits += sample_times;
@@ -266,6 +1018,26 @@ MCTNode* Planner::MCT_selection(std::vector<MCTNode*>& node_pool, HNode* goal_no
   return selected_node;
 }
 
+
+
+MCTNode* Planner::MCT_selection(std::vector<MCTNode*>& node_pool){
+  MCTNode* selected_node = nullptr; 
+  // std::cout<<"Pool size: "<< node_pool.size() <<std::endl;
+  double max_utc_value = -std::numeric_limits<double>::infinity();
+  for(auto node : node_pool){
+    if(!node->completed_node){
+      // std::cout<<"Node ID: "<< node->node_id <<" ";
+      double UCT_value = compute_uct_value(node);
+      if(max_utc_value <= UCT_value){
+        selected_node = node; 
+        max_utc_value = UCT_value;
+      }
+    }
+  }
+  // std::cout<<" "<< std::endl; 
+  return selected_node;
+}
+
 double Planner::compute_uct_value(MCTNode* mcts_node){
   double uct_value = 0;
   if(mcts_node->visits == 0){
@@ -275,7 +1047,7 @@ double Planner::compute_uct_value(MCTNode* mcts_node){
     //we use f-value lower the better.
     // set failuare cases with maximal_f_value;
     double exploitation = 1 - minMaxStats.normalize( (mcts_node->reward + mcts_node->failuare_times * minMaxStats.get_maximum() ) / mcts_node->visits); 
-    double exploration = C  * std::sqrt(std::log(parent_visit) / mcts_node->visits);
+    double exploration =  2 * C  * std::sqrt(std::log(parent_visit) / mcts_node->visits);
     uct_value = exploitation + exploration;
   }
   return uct_value;
@@ -309,6 +1081,1713 @@ void Planner::print_utc_value(std::vector<MCTNode*>& node_pool){
     std::cout<< "      "<< "utc value: "<< exploitation + exploration <<std::endl;
   }
 }
+
+
+
+MCTNode* Planner::MCT_random_successor_generator(Config& C_new, MCTNode* mcts_node, 
+  std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, HNode* H_goal){
+  MCTNode* MCT_new = nullptr;
+  for (int k = 0; k < 10; k++){
+    // try 10 times to generate a new successor;
+    auto order  = mcts_node->hNode->order;
+    if(mcts_node->first_branch){
+        order = global_order;
+    }else{
+      std::shuffle(order.begin(), order.end(), *MT);
+    }
+    const auto res = get_next_configuration_rollout(mcts_node->hNode->C,  order, nullptr);
+    if (!res) {
+      continue;
+    } 
+    for (auto a : A) C_new[a->id] = a->v_next;
+    // check explored list 
+    auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      rewrite_no_push(mcts_node->hNode, iter->second, H_goal);
+      MCT_new = new MCTNode(mcts_node,iter->second, global_MCT_node_id);
+      iter->second->set_priority_and_order(order);
+      iter->second->reordering(N,D);
+      global_MCT_node_id ++;
+      MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, C_new));
+      mcts_node->first_branch = false;
+      return MCT_new;
+    }else{
+      const auto H_new = new HNode(
+        C_new, D, mcts_node->hNode, 
+        mcts_node->hNode->g + get_edge_cost(mcts_node->hNode->C, C_new), get_h_value(C_new));
+      H_new->setNodeID(global_node_id);
+      global_node_id ++;
+      H_new->setMakeSpan(mcts_node->hNode->current_make_span + 1);
+      H_new->set_priority_and_order(order);
+      H_new->reordering(N,D);
+      EXPLORED[H_new->C] = H_new;
+      MCT_new = new MCTNode(mcts_node,H_new, global_MCT_node_id);
+      global_MCT_node_id ++;
+      // set MCT node g value;
+      MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, C_new));
+      mcts_node->first_branch = false;
+      return MCT_new;
+    }
+  }
+  MCT_new->completed_node = true;
+  return MCT_new;
+}
+
+   
+
+MCTNode* Planner::MCT_Learn_order_to_branch(Config& C_new, MCTNode* mcts_node, 
+  std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, HNode* H_goal){
+  MCTNode* MCT_new = nullptr;
+  for (int k = 0; k < 10; k++){
+    // try 10 times to generate a new successor;
+    auto order  = mcts_node->hNode->order;
+    if(mcts_node->first_branch){
+        order = global_order;
+    }else{
+      std::uniform_real_distribution<double> dist(0.0, 0.2); 
+      double percentage_preserve = dist(*MT);
+      auto preserve_start = static_cast<size_t>(order.size() * (1.0 - percentage_preserve));
+      std::sort(order.begin(), order.begin() + preserve_start , [&](uint i, uint j) {
+          return mcts_node->agent_ratio[i] < mcts_node->agent_ratio[j]; // Sort in descending order of agent_ratio
+      });
+    }
+    const auto res = get_next_configuration_rollout(mcts_node->hNode->C,  order, nullptr);
+    if (!res) {
+      continue;
+    } 
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    if (mcts_node->generated_configs.find(C_new) != mcts_node->generated_configs.end()) {
+      continue; // Skip if the configuration is already generated
+    }
+
+   
+
+    // check explored list 
+    auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      rewrite_no_push(mcts_node->hNode, iter->second, H_goal);
+      MCT_new = new MCTNode(mcts_node,iter->second, global_MCT_node_id);
+      iter->second->set_priority_and_order(order);
+      iter->second->reordering(N,D);
+      global_MCT_node_id ++;
+      MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, C_new));
+      mcts_node->first_branch = false;
+       // Add the new configuration to the set
+      mcts_node->generated_configs[iter->second->C] = 0;
+      return MCT_new;
+    }else{
+      const auto H_new = new HNode(
+        C_new, D, mcts_node->hNode, 
+        mcts_node->hNode->g + get_edge_cost(mcts_node->hNode->C, C_new), get_h_value(C_new));
+      H_new->setNodeID(global_node_id);
+      global_node_id ++;
+      H_new->setMakeSpan(mcts_node->hNode->current_make_span + 1);
+      H_new->set_priority_and_order(order);
+      H_new->reordering(N,D);
+      EXPLORED[H_new->C] = H_new;
+      MCT_new = new MCTNode(mcts_node,H_new, global_MCT_node_id);
+      global_MCT_node_id ++;
+      // set MCT node g value;
+      MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, C_new));
+      mcts_node->first_branch = false;
+      mcts_node->generated_configs[iter->second->C] = 0;
+      return MCT_new;
+    }
+  }
+  mcts_node->completed_node = true;
+  return MCT_new;
+}
+
+
+
+MCTNode* Planner::MCT_Learn_order_to_branch(Config& C_new, MCTNode* mcts_node){
+  MCTNode* MCT_new = nullptr;
+  for (int k = 0; k < 10; k++){
+    // try 10 times to generate a new successor;
+    auto order  = mcts_node->hNode->order;
+    if(mcts_node->first_branch){
+        order = global_order;
+    }else{
+      // std::uniform_real_distribution<double> dist(0.0, 0.2); 
+      // double percentage_preserve = dist(*MT);
+      // auto preserve_start = static_cast<size_t>(order.size() * (1.0 - percentage_preserve));
+      // std::sort(order.begin(), order.begin() + preserve_start , [&](uint i, uint j) {
+      //     return mcts_node->agent_ratio[i] < mcts_node->agent_ratio[j]; // Sort in descending order of agent_ratio
+      // });
+
+              std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+        for (size_t i = 0; i < mcts_node->agent_ratio.size(); ++i) {
+          mcts_node->agent_ratio[i] = mcts_node->agent_ratio[i] + noise_dist(*MT);
+        }
+        std::sort(order.begin(), order.end(), [&](uint i, uint j) {
+            return (mcts_node->agent_ratio[i] ) < (mcts_node->agent_ratio[j] );
+        });
+    }
+    const auto res = get_next_configuration_rollout(mcts_node->hNode->C,  order, nullptr);
+    if (!res) {
+      continue;
+    } 
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    if (mcts_node->generated_configs.find(C_new) != mcts_node->generated_configs.end()) {
+      continue; // Skip if the configuration is already generated
+    }
+    const auto H_new = new HNode(
+      C_new, D, mcts_node->hNode, 
+      0, get_h_value(C_new));
+    H_new->setNodeID(global_node_id);
+    global_node_id ++;
+    H_new->setMakeSpan(mcts_node->hNode->current_make_span + 1);
+    H_new->set_priority_and_order(order);
+    H_new->reordering(N,D);
+    MCT_new = new MCTNode(mcts_node,H_new, global_MCT_node_id);
+    global_MCT_node_id ++;
+    // set MCT node g value;
+    MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, C_new));
+    mcts_node->first_branch = false;
+    mcts_node->generated_configs[H_new->C] = 0;
+    return MCT_new;
+  }
+  mcts_node->completed_node = true;
+  return MCT_new;
+}
+
+
+
+uint Planner::run_completed_lacam(HNode* H_init_node,std::vector<double>& agent_ratio)
+{
+  // for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+  for (auto i = 0; i < N; ++i){
+    A[i]->v_next = nullptr;
+    A[i]->v_now = nullptr;
+  }
+  for (size_t i = 0; i < occupied_next.size(); ++i) {
+    occupied_next[i] = nullptr;
+    occupied_now[i] = nullptr;
+  }
+
+  // setup search
+  auto OPEN = std::stack<HNode*>();
+  auto EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+  HNode* H_init = new HNode(
+    H_init_node->C,          // Copy the configuration
+    D,          // Copy the distance table (if applicable)
+    H_init_node->parent,     // Copy the parent pointer
+    H_init_node->g,          // Copy the g-value
+    H_init_node->h           // Copy the h-value
+  );
+  H_init->set_priority_and_order(H_init_node->order); // Copy the order
+  H_init->reordering(H_init_node->priorities.size(), D); // Reorder priorities
+
+
+  H_init->parent = nullptr;
+  OPEN.push(H_init);
+  EXPLORED[H_init->C] = H_init;
+  
+  auto C_new = Config(N, nullptr);  // for new configuration
+  HNode* H_goal = nullptr;          // to store goal node
+
+
+  while (!OPEN.empty()) {
+
+    // do not pop here!
+    auto H = OPEN.top();  // high-level node
+
+    if (H->search_tree.empty()) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check lower bounds
+    if (H_goal != nullptr && H->f >= H_goal->f) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      H_goal = H;
+      // solver_info(1, "found solution, cost: ", H->g);
+      std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+      HNode* current = H_goal;
+      while (current != H_init) {
+        get_edge_cost_per_agent(agent_ratio,current->C,current->parent->C);
+        current = current->parent;
+      }
+      compute_agent_increase_ratio(agent_ratio, H_init->C, H_goal->C);
+    
+      uint solution = H_goal->g;
+      // solver_info(1, "found solution, cost: ", solution);
+      for (auto itr : EXPLORED) delete itr.second;
+        // for (auto a : A) delete a;
+      return solution;
+    }
+
+    // create successors at the low-level search
+    auto L = H->search_tree.front();
+    H->search_tree.pop();
+    expand_lowlevel_tree(H, L);
+
+    // create successors at the high-level search
+    const auto res = get_new_config(H, L);
+    delete L;  // free
+    if (!res) continue;
+
+    // create new configuration
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      // case found
+      rewrite(H, iter->second, H_goal, OPEN);
+      OPEN.push(iter->second);
+    } else {
+      // insert new search node
+      const auto H_new = new HNode(
+          C_new, D, H, H->g + get_edge_cost(H->C, C_new), get_h_value(C_new));
+      EXPLORED[H_new->C] = H_new;
+      OPEN.push(H_new);
+    }
+  }
+}
+
+HNode* Planner::copy_node(HNode* original_node) {
+  // Create a new HNode with the same configuration and attributes as the original node
+  HNode* copy = new HNode(
+      original_node->C,          // Copy the configuration
+      D,                         // Copy the distance table
+      original_node->parent,     // Copy the parent pointer
+      original_node->g,          // Copy the g-value
+      original_node->h           // Copy the h-value
+  );
+
+  // Copy additional attributes
+  copy->set_priority_and_order(original_node->order); // Copy the order
+  copy->reordering(original_node->priorities.size(), D); // Reorder priorities
+
+  return copy;
+}
+
+uint Planner::run_constrainted_completed_lacam(HNode* H_init_node,std::vector<double>& agent_ratio,
+  std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, 
+  HNode*& H_goal, std::vector<Config>& solution, std::unordered_set<int>& fixed_agents){
+  for (auto i = 0; i < N; ++i){
+    A[i]->v_next = nullptr;
+    A[i]->v_now = nullptr;
+  }
+  for (size_t i = 0; i < occupied_next.size(); ++i) {
+    occupied_next[i] = nullptr;
+    occupied_now[i] = nullptr;
+  }
+
+  // setup search
+  auto OPEN = std::stack<HNode*>();
+  HNode* H_init = new HNode(
+    H_init_node->C,          // Copy the configuration
+    D,          // Copy the distance table (if applicable)
+    H_init_node->parent,     // Copy the parent pointer
+    0,    // Copy the g-value
+    H_init_node->h           // Copy the h-value
+  );
+  H_init->set_priority_and_order(H_init_node->order); // Copy the order
+  H_init->reordering(H_init_node->priorities.size(), D); // Reorder priorities
+  for (auto itr : EXPLORED) delete itr.second;
+  EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+
+  H_init->parent = nullptr;
+  OPEN.push(H_init);
+  EXPLORED[H_init->C] = H_init;
+  H_init->setMakeSpan(0);
+  
+  auto C_new = Config(N, nullptr);  // for new configuration
+  H_goal = nullptr;          // to store goal node
+
+
+  while (!OPEN.empty()) {
+
+    // do not pop here!
+    auto H = OPEN.top();  // high-level node
+
+    if (H->search_tree.empty()) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check lower bounds
+    if (H_goal != nullptr && H->f >= H_goal->f) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      H_goal = H;
+      // solver_info(1, "found solution, cost: ", H->g);
+      std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+      HNode* current = H_goal;
+      while (current != H_init) {
+        get_edge_cost_per_agent(agent_ratio,current->C,current->parent->C);
+        current = current->parent;
+      }
+      compute_agent_increase_ratio(agent_ratio, H_init->C, H_goal->C);
+    
+      uint solution = H_goal->g;
+      return solution;
+    }
+
+    // create successors at the low-level search
+    auto L = H->search_tree.front();
+    H->search_tree.pop();
+    // expand_lowlevel_tree(H, L);
+
+    std::cout << "           "<< std::endl;
+    std::cout << "           "<< std::endl;
+    std::cout << "Configuration: [";
+    for (size_t i = 0; i < H->C.size(); ++i) {
+        if (H->C[i] != nullptr) {
+            std::cout << "{ID: " << i << ", Index: " << H->C[i]->index << "}";
+        } else {
+            std::cout << "Null";
+        }
+        if (i < H->C.size() - 1) {
+            std::cout << ", ";
+        }
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "           "<< std::endl;
+    std::cout << "           "<< std::endl;
+
+
+
+    std::cout << "constrainted agents:"<< std::endl;
+    std::cout << "           "<< std::endl;
+    std::cout << "Configuration: [";
+    for (auto i : fixed_agents) {
+        if (H->C[i] != nullptr) {
+            std::cout << "{ID: " << i << ", Index: " << H->C[i]->index << "}";
+        } else {
+            std::cout << "Null";
+        }
+        if (i < H->C.size() - 1) {
+            std::cout << ", ";
+        }
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "           "<< std::endl;
+    std::cout << "           "<< std::endl;
+
+    if( solution.size() >  0 && H->current_make_span < solution.size() -1 ){
+      expand_lowlevel_tree_avoid_agent(H, L, fixed_agents);
+      auto& next_config = solution[H->current_make_span + 1];
+      for (auto a : fixed_agents) {
+        if(next_config[a] != ins->goals[a]){
+          L->who.push_back(a);
+          L->where.push_back(next_config[a]);
+        }
+      }
+      // expand_lowlevel_tree(H, L);
+    }else{
+      expand_lowlevel_tree(H, L);
+    }
+    
+    // create successors at the high-level search
+    const auto res = get_new_config(H, L);
+    if (!res) {
+      bool a =0;
+    }
+
+    delete L;  // free
+    if (!res) {
+      bool a =0;
+      continue;
+    }
+
+    // create new configuration
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    if( solution.size() >  0 && H->current_make_span < solution.size() -1 ){
+      auto& next_config = solution[H->current_make_span + 1];
+      for (auto a : fixed_agents) {
+        auto b =  C_new[a]->id;
+        auto c = next_config[a]->id;
+        if(C_new[a]->id != next_config[a]->id){
+          std::cout<<" werid" <<std::endl; 
+        }
+      }
+    }
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      // case found
+      rewrite(H, iter->second, H_goal, OPEN);
+      H->current_make_span + 1 < iter->second->current_make_span ? 
+      iter->second->setMakeSpan(H->current_make_span + 1 ) : 
+        iter->second->setMakeSpan(iter->second->current_make_span);
+        
+        auto H_insert = (MT != nullptr && get_random_float(MT) >= RESTART_RATE)
+        ? iter->second
+        : H_init;
+        if (H_goal == nullptr || H_insert->f < H_goal->f){
+        OPEN.push(H_insert);
+        // record_highlevel_node(H_insert,false,false);
+        } 
+    } else {
+      // insert new search node
+      const auto H_new = new HNode(
+          C_new, D, H, H->g + get_edge_cost(H->C, C_new), get_h_value(C_new));
+      H_new->setMakeSpan(H->current_make_span + 1);
+      EXPLORED[H_new->C] = H_new;
+      OPEN.push(H_new);
+    }
+  } 
+
+
+}
+
+
+
+
+uint Planner::run_completed_lacam(HNode* H_init_node,std::vector<double>& agent_ratio,
+  std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, HNode*& H_goal
+)
+{
+  // for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+  for (auto i = 0; i < N; ++i){
+    A[i]->v_next = nullptr;
+    A[i]->v_now = nullptr;
+  }
+  for (size_t i = 0; i < occupied_next.size(); ++i) {
+    occupied_next[i] = nullptr;
+    occupied_now[i] = nullptr;
+  }
+
+  // setup search
+  auto OPEN = std::stack<HNode*>();
+  HNode* H_init = new HNode(
+    H_init_node->C,          // Copy the configuration
+    D,          // Copy the distance table (if applicable)
+    H_init_node->parent,     // Copy the parent pointer
+    0,    // Copy the g-value
+    H_init_node->h           // Copy the h-value
+  );
+  H_init->set_priority_and_order(H_init_node->order); // Copy the order
+  H_init->reordering(H_init_node->priorities.size(), D); // Reorder priorities
+  for (auto itr : EXPLORED) delete itr.second;
+  EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+
+  H_init->parent = nullptr;
+  OPEN.push(H_init);
+  EXPLORED[H_init->C] = H_init;
+  
+  auto C_new = Config(N, nullptr);  // for new configuration
+  H_goal = nullptr;          // to store goal node
+
+
+  while (!OPEN.empty()) {
+
+    // do not pop here!
+    auto H = OPEN.top();  // high-level node
+
+    if (H->search_tree.empty()) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check lower bounds
+    if (H_goal != nullptr && H->f >= H_goal->f) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      H_goal = H;
+      // solver_info(1, "found solution, cost: ", H->g);
+      std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+      HNode* current = H_goal;
+      while (current != H_init) {
+        get_edge_cost_per_agent(agent_ratio,current->C,current->parent->C);
+        current = current->parent;
+      }
+      compute_agent_increase_ratio(agent_ratio, H_init->C, H_goal->C);
+    
+      uint solution = H_goal->g;
+      return solution;
+    }
+
+    // create successors at the low-level search
+    auto L = H->search_tree.front();
+    H->search_tree.pop();
+    expand_lowlevel_tree(H, L);
+
+    // create successors at the high-level search
+    const auto res = get_new_config(H, L);
+    delete L;  // free
+    if (!res) continue;
+
+    // create new configuration
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      // case found
+      rewrite(H, iter->second, H_goal, OPEN);
+      auto H_insert = (MT != nullptr && get_random_float(MT) >= RESTART_RATE)
+                          ? iter->second
+                          : H_init;
+      if (H_goal == nullptr || H_insert->f < H_goal->f){
+        OPEN.push(H_insert);
+        // record_highlevel_node(H_insert,false,false);
+      } 
+      // OPEN.push(iter->second);
+    } else {
+      // insert new search node
+      const auto H_new = new HNode(
+          C_new, D, H, H->g + get_edge_cost(H->C, C_new), get_h_value(C_new));
+      EXPLORED[H_new->C] = H_new;
+      OPEN.push(H_new);
+    }
+  }
+}
+
+MCTNode* Planner::MCT_select_successors_from_pool(MCTNode* mcts_node,  
+  std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, 
+  std::vector<Config>& solution, HNode*& H_goal)
+{
+
+  while(  mcts_node->generated_configs.size() == 0){
+    auto results = multiple_simulations(10, H_goal, mcts_node, EXPLORED, solution);
+    if(results == std::numeric_limits<uint>::max()){
+      mcts_node->completed_node = true;
+      return nullptr;
+    }
+  }
+  
+  HNode* h_next = nullptr;
+  uint best_simulate_results = std::numeric_limits<uint>::max();
+  auto best_iter = mcts_node->generated_configs.end();
+  
+  for (auto iter = mcts_node->generated_configs.begin(); iter != mcts_node->generated_configs.end(); ++iter) {
+      if (best_simulate_results > iter->second->simulation_cost) {
+          best_simulate_results = iter->second->simulation_cost;
+          h_next = iter->second;
+          best_iter = iter; // Keep track of the best iterator
+      }
+  }
+  //   std::cout<<" "<<std::endl;
+  // std::cout<<" "<<std::endl;
+  // std::cout<<" select cost :"<< best_simulate_results<<std::endl;
+  // std::cout<<" "<<std::endl;
+
+  // auto agent_ratio = std::vector<double>(N, 0);
+
+  h_next->setNodeID(global_node_id);
+  global_node_id ++;
+  h_next->setMakeSpan(mcts_node->hNode->current_make_span + 1);
+  MCTNode* MCT_new = new MCTNode(mcts_node,h_next, global_MCT_node_id);
+  global_MCT_node_id ++;
+  MCT_new->setCurrentGValue(mcts_node->curr_g_value + get_edge_cost(mcts_node->hNode->C, h_next->C));
+  // Remove the selected iter from generated_configs
+  if (best_iter != mcts_node->generated_configs.end()) {
+      mcts_node->generated_configs.erase(best_iter);
+  }
+
+  return MCT_new;
+}
+
+
+uint Planner::multiple_simulations(int num_simulations, HNode*& H_goal,
+   MCTNode* mcts_node, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, std::vector<Config>& solution){
+    uint best_simulate_results = std::numeric_limits<uint>::max();
+
+    // num_simulations = 5;
+    for (int k = 0; k < num_simulations; k++){
+      // try 10 times to generate a new successor;
+      auto order = mcts_node->hNode->order;
+      if(k > 0){
+        std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+        for (size_t i = 0; i < mcts_node->agent_ratio.size(); ++i) {
+          mcts_node->agent_ratio[i] = mcts_node->agent_ratio[i] * (1 + noise_dist(*MT));
+        }
+        std::sort(order.begin(), order.end(), [&](uint i, uint j) {
+            return (mcts_node->agent_ratio[i] ) < (mcts_node->agent_ratio[j] );
+        });
+      }
+      mcts_node->hNode->order = order;
+      auto simulate_result = run_completed_lacam(mcts_node->hNode,mcts_node->agent_ratio,EXPLORED,H_goal);
+
+      if(simulate_result == -1){
+        continue;
+      }
+      simulate_result += mcts_node->curr_g_value;
+      if(min_f_cost > simulate_result ){
+        min_f_cost = simulate_result ;
+        best_mct_node = mcts_node;
+        solution = std::vector<Config>();
+        auto H = H_goal;
+        while(H != nullptr ){
+          solution.push_back(H->C);
+          H = H->parent;
+        }
+        solver_info(1, "found solution, cost: ", min_f_cost);
+      }
+
+      if(best_simulate_results > simulate_result){
+        best_simulate_results = simulate_result;
+      }
+      // if(mcts_node->best_simulation_cost > simulate_result){
+      //   mcts_node->best_simulation_cost = simulate_result;
+        HNode* Successors = nullptr; 
+        auto H = H_goal;
+        while(H != nullptr ){
+          if(H->parent->parent == nullptr){
+            if (mcts_node->generated_configs.find(H->C) != mcts_node->generated_configs.end()) {
+              if(mcts_node->generated_configs[H->C]->simulation_cost > simulate_result){
+                mcts_node->generated_configs[H->C]->simulation_cost = simulate_result;
+                mcts_node->generated_configs[H->C]->order = H->order ; // Copy the order
+              }
+              std::cout<< "found existing node"<< std::endl;
+            }else{
+              Successors = new HNode(
+                H->C, D, nullptr, 0, H->h);
+              Successors->order = H->order;
+              Successors->simulation_cost = simulate_result;
+              mcts_node->generated_configs[Successors->C] = Successors;
+            }
+            break; 
+          }
+          H = H->parent;
+        }
+      // }
+      // if(mcts_node->generated_configs.size() > 200){
+      //   // std::cout<< "number of successors:" << mcts_node->generated_configs.size() <<std::endl;
+      // }
+      // std::cout<< "number of successors:" << mcts_node->generated_configs.size() <<std::endl;
+    }
+  // std::cout<< "Returned simulation cost "<< best_simulate_results <<std::endl;
+    return best_simulate_results;
+}
+
+
+Solution Planner::MCT_multiple_lacam(std::string& additional_info){
+  // setup agents
+  for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+
+
+  auto OPEN = std::vector<MCTNode*>();
+  auto H_init = new HNode(ins->starts, D, nullptr, 0, get_h_value(ins->starts));
+  H_init->setNodeID(global_node_id);
+  global_node_id ++;
+  global_order = H_init->order;
+  global_MCT_node_id = 1;
+
+  
+  auto MCT_init = new MCTNode(nullptr,H_init,global_MCT_node_id);
+  global_MCT_node_id ++; 
+  H_init->setMakeSpan(0);
+  OPEN.push_back(MCT_init);
+  MCT_init->initialize_agent_ratio(N);
+
+  minMaxStats = MinMaxStats();
+  min_f_cost = std::numeric_limits<uint>::max();
+  best_mct_node = nullptr;
+  std::vector<Config> solution;
+  auto C_new = Config(N, nullptr);  // for new configuration
+  auto EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+  HNode* H_goal = nullptr;
+
+
+  // for( int j = 0; j < 100000; j ++){
+  //   if( j != 0){
+  //     std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+  //     for (size_t i = 0; i < MCT_init->agent_ratio.size(); ++i) {
+  //       MCT_init->agent_ratio[i] = MCT_init->agent_ratio[i] * (1 + noise_dist(*MT));
+  //     }
+  //     std::sort(MCT_init->hNode->order.begin(),MCT_init->hNode->order.end(), [&](uint i, uint j) {
+  //         return (MCT_init->agent_ratio[i] ) < (MCT_init->agent_ratio[j] );
+  //     });
+  //   }
+  //   // std::shuffle(MCT_init->hNode->order.begin(), MCT_init->hNode->order.end(), *MT);
+  //   auto simulate_result = run_completed_lacam(MCT_init->hNode,MCT_init->agent_ratio
+  //     , EXPLORED, H_goal);
+  //   if(min_f_cost > simulate_result ){
+  //     min_f_cost = simulate_result ;
+  //     solver_info(1, "found solution, cost: ", min_f_cost);
+  //   }
+  //   // solver_info(1, "found solution, cost: ", min_f_cost);
+  // }
+
+
+  for( int j = 0; j < 100000; j ++){
+    std::unordered_set<int> fixed_agents = std::unordered_set<int>();
+    if( j != 0){
+      std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+      for (size_t i = 0; i < MCT_init->agent_ratio.size(); ++i) {
+        MCT_init->agent_ratio[i] = MCT_init->agent_ratio[i] * (1 + noise_dist(*MT));
+      }
+      std::sort(MCT_init->hNode->order.begin(),MCT_init->hNode->order.end(), [&](uint i, uint j) {
+          return (MCT_init->agent_ratio[i] ) < (MCT_init->agent_ratio[j] );
+      });
+
+      for( int k = 0; k < N * 0.1; k ++){
+        fixed_agents.insert(MCT_init->hNode->order[k]);
+      }
+    }
+    // std::shuffle(MCT_init->hNode->order.begin(), MCT_init->hNode->order.end(), *MT);
+    auto simulate_result = run_constrainted_completed_lacam(
+    MCT_init->hNode,MCT_init->agent_ratio, EXPLORED, H_goal, solution, fixed_agents);
+    // auto simulate_result = run_completed_lacam(MCT_init->hNode,MCT_init->agent_ratio
+          // , EXPLORED, H_goal);
+
+    solution = std::vector<Config>();
+    auto H = H_goal;
+    while(H != nullptr ){
+      solution.push_back(H->C);
+      H = H->parent;
+    }
+    std::reverse(solution.begin(), solution.end());
+
+    if(min_f_cost > simulate_result ){
+      min_f_cost = simulate_result ;
+      solver_info(1, "found solution, cost: ", min_f_cost);
+    }
+    // solver_info(1, "found solution, cost: ", min_f_cost);
+  }
+  auto reward = multiple_simulations(10, H_goal, MCT_init, EXPLORED, solution);
+  if(reward  == -1){
+    MCT_backpropagate(MCT_init,1,0,1);
+  }else{
+    MCT_backpropagate(MCT_init,1,reward,0);
+    minMaxStats.update(reward);
+  }
+
+  if(verbose == -1){
+    std::cout<< "version: 1.4.0\n";
+    std::cout<< "events:\n";
+    std::cout<< " - type: expanding" <<std::endl;
+    std::cout<< "   id: "<< MCT_init->node_id <<std::endl;
+    std::cout<< "   pId: " 
+          << (MCT_init->parent == nullptr ? "null" : std::to_string(MCT_init->parent->node_id)) 
+          << std::endl;
+    std::cout<< "   visits: "<< MCT_init->visits<<std::endl;
+    std::cout<< "   reward: "<< MCT_init->reward <<std::endl;
+    print_utc_value(OPEN);
+  }
+  for(int i = 0; i < 10; i++){
+    // const auto MCT_new  = MCT_random_successor_generator(C_new, MCT_init, EXPLORED,H_goal);
+    const auto MCT_new  = MCT_select_successors_from_pool(MCT_init, EXPLORED, solution,H_goal);
+    if(MCT_new != nullptr){
+      MCT_new ->initialize_agent_ratio(N);
+      auto simulation_cost = multiple_simulations(10, H_goal, MCT_new, EXPLORED, solution);
+      // std::cout<<"Simulation cost: "<< simulation_cost <<std::endl;
+      if(simulation_cost  == -1){
+        MCT_backpropagate(MCT_new,1,0,1);
+      }else{
+        // simulation_cost += MCT_new->curr_g_value;
+        // std::cout<< "simulation cost: "<< simulation_cost <<std::endl;
+        MCT_backpropagate(MCT_new,1,simulation_cost,0);
+        minMaxStats.update(simulation_cost);
+      }
+      OPEN.push_back(MCT_new);
+      if(verbose == -1){
+        std::cout<< " - type: generating" <<std::endl;
+        std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+        std::cout<< "   pId: " 
+          << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+          << std::endl;
+        std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+        std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      }
+    } 
+  }
+  while (!is_expired(deadline)) {
+    loop_cnt += 1;
+
+    // do not pop here!
+    auto MCT_NODE =  MCT_selection(OPEN);// high-level node
+    if(MCT_NODE == nullptr){
+      break;
+    }
+    // std::cout<<"Selected !" <<std::endl;
+    // std::cout << "Selecting node with ID: " << MCT_NODE->node_id << " ;" <<std::endl;
+    auto H  = MCT_NODE->hNode; 
+    if (H->search_tree.empty()) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+    // check lower bounds
+    if (MCT_NODE->curr_g_value >= min_f_cost) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+
+    if(verbose == -1){
+      std::cout<< " - type: expanding" <<std::endl;
+      std::cout<< "   id: "<< MCT_NODE->node_id <<std::endl;
+      std::cout<< "   pId: " 
+            << (MCT_NODE->parent == nullptr ? "null" : std::to_string(MCT_NODE->parent->node_id)) 
+            << std::endl;
+      std::cout<< "   visits: "<< MCT_NODE->visits<<std::endl;
+      std::cout<< "   reward: "<< MCT_NODE->reward <<std::endl;
+      print_utc_value(OPEN);
+    }
+
+    // check goal condition
+    if ( is_same_config(H->C, ins->goals)) {
+      min_f_cost = MCT_NODE->curr_g_value;
+      best_mct_node = MCT_NODE;
+      MCT_NODE -> completed_node = true;
+      solver_info(1, "found solution, cost: ", min_f_cost);
+      continue;
+    }
+
+    // std::cout<<"I am here !" <<std::endl;
+    // create successors at the low-level search
+    MCTNode* MCT_new  = MCT_select_successors_from_pool(MCT_NODE, EXPLORED, solution,H_goal);
+    if(MCT_new == nullptr){
+      MCT_backpropagate(MCT_NODE,1,0,1);
+      continue;
+    }else{
+      MCT_new ->initialize_agent_ratio(N);
+      // auto simulation_cost = Lacam_simulator(MCT_new->hNode, H_goal, EXPLORED, 
+        // false, node_budget, MCT_NODE->agent_ratio);
+      auto simulation_cost = multiple_simulations(10, H_goal, MCT_new, EXPLORED, solution);
+      // std::cout<<"Simulation cost: "<< simulation_cost <<std::endl;
+      if(simulation_cost  == -1){
+        MCT_backpropagate(MCT_new,1,0,1);
+      }else{
+        // simulation_cost += MCT_new->curr_g_value;
+        MCT_backpropagate(MCT_new,1,simulation_cost,0);
+        minMaxStats.update(simulation_cost);
+      }
+      OPEN.push_back(MCT_new); 
+      if(verbose == -1){
+        std::cout<< " - type: generating" <<std::endl;
+        std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+        std::cout<< "   pId: " 
+          << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+          << std::endl;
+        std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+        std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      }
+    } 
+    // }
+  }
+
+  if(best_mct_node->parent != nullptr){
+    auto H = best_mct_node->parent;
+    while(H != nullptr ){
+      solution.push_back(H->hNode->C);
+      H = H->parent;
+    }
+  }
+  if(solution.size() != 0){
+    std::reverse(solution.begin(), solution.end());
+  }
+  // print result
+  if (best_mct_node  != nullptr && OPEN.empty()) {
+    solver_info(1, "solved optimally, objective: ", objective);
+  } else if (best_mct_node  != nullptr) {
+    solver_info(1, "solved sub-optimally, objective: ", objective);
+  } else if (OPEN.empty()) {
+    solver_info(1, "no solution");
+  } else {
+    solver_info(1, "timeout");
+  }
+
+  // logging
+  additional_info +=
+      "optimal=" + std::to_string(best_mct_node != nullptr && OPEN.empty()) + "\n";
+  additional_info += "objective=" + std::to_string(objective) + "\n";
+  additional_info += "loop_cnt=" + std::to_string(loop_cnt) + "\n";
+  additional_info += "num_node_gen=" + std::to_string(OPEN.size()) + "\n";
+
+
+  // save to tree file 
+  if(tree_file != "none"){
+    saveTree(tree_file);
+  }
+
+  // memory management
+  for (auto a : A) delete a;
+  for (auto itr : OPEN){
+    delete itr;
+  } 
+
+  return solution;
+
+
+
+
+
+
+}
+
+
+Solution Planner::MCT_vanilla_lacam(std::string& additional_info)
+{
+  // setup agents
+  for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+
+  // setup search
+  auto OPEN = std::vector<MCTNode*>();
+  auto H_init = new HNode(ins->starts, D, nullptr, 0, get_h_value(ins->starts));
+  H_init->setNodeID(global_node_id);
+  global_node_id ++;
+  global_order = H_init->order;
+  global_MCT_node_id = 1;
+
+  
+  auto MCT_init = new MCTNode(nullptr,H_init,global_MCT_node_id);
+  global_MCT_node_id ++; 
+  H_init->setMakeSpan(0);
+  OPEN.push_back(MCT_init);
+  MCT_init->initialize_agent_ratio(N);
+
+  minMaxStats = MinMaxStats();
+  min_f_cost = std::numeric_limits<uint>::max();
+  best_mct_node = nullptr;
+  std::vector<Config> solution;
+  auto C_new = Config(N, nullptr);  // for new configuration
+  auto EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+  HNode* H_goal = nullptr;
+  // const auto H_copy = new HNode(
+  //   H_init->C, D, nullptr, H_init->g, H_init->h);
+  // H_copy->set_priority_and_order(H_init->order);// Create a non-const copy
+  // H_copy->reordering(N, D);
+  
+  auto r = run_completed_lacam(H_init,MCT_init->agent_ratio,EXPLORED,H_goal);
+  // Lacam_simulator(MCT_init->hNode, H_goal, EXPLORED, true, 0,MCT_init->agent_ratio);
+  if(r  == -1){
+    MCT_backpropagate(MCT_init,1,0,1);
+  }else{
+    MCT_backpropagate(MCT_init,1,r,0);
+    minMaxStats.update(r);
+    if(min_f_cost > r){
+      min_f_cost = r;
+      best_mct_node = MCT_init;
+      solution = std::vector<Config>();
+      auto H = H_goal;
+      while(H != nullptr ){
+        solution.push_back(H->C);
+        H = H->parent;
+      }
+      solver_info(1, "found solution, cost: ", min_f_cost);
+    }
+  }
+
+  // if(verbose == -1){
+  //   std::cout<< "version: 1.4.0\n";
+  //   std::cout<< "events:\n";
+  //   std::cout<< " - type: expanding" <<std::endl;
+  //   std::cout<< "   id: "<< MCT_init->node_id <<std::endl;
+  //   std::cout<< "   pId: " 
+  //         << (MCT_init->parent == nullptr ? "null" : std::to_string(MCT_init->parent->node_id)) 
+  //         << std::endl;
+  //   std::cout<< "   visits: "<< MCT_init->visits<<std::endl;
+  //   std::cout<< "   reward: "<< MCT_init->reward <<std::endl;
+  //   print_utc_value(OPEN);
+  // }
+  
+  // uint node_budget = H_goal->current_make_span;
+  // for the sake of MCTS, let's force the root not have k branch factors.
+  for(int i = 0; i < 10; i++){
+    // const auto MCT_new  = MCT_random_successor_generator(C_new, MCT_init, EXPLORED,H_goal);
+    const auto MCT_new  = MCT_Learn_order_to_branch(C_new, MCT_init);
+    if(MCT_new != nullptr){
+      // auto simulation_cost = Lacam_simulator(MCT_new->hNode, H_goal, EXPLORED, 
+      //   false, node_budget,MCT_init->agent_ratio);
+      auto simulation_cost = run_completed_lacam(MCT_new->hNode,MCT_init->agent_ratio,EXPLORED,H_goal);
+      // std::cout<< "Results: "<< results <<std::endl;
+      if(simulation_cost  == -1){
+        MCT_backpropagate(MCT_new,1,0,1);
+      }else{
+        simulation_cost += MCT_new->curr_g_value;
+        MCT_backpropagate(MCT_new,1,simulation_cost,0);
+        minMaxStats.update(simulation_cost);
+        if(min_f_cost > simulation_cost){
+          min_f_cost = simulation_cost;
+          best_mct_node = MCT_new;
+
+          solution = std::vector<Config>();
+          auto H = H_goal;
+          while(H != nullptr ){
+            solution.push_back(H->C);
+            H = H->parent;
+          }
+          solver_info(1, "found solution, cost: ", min_f_cost);
+        }
+        // solver_info(1, "found solution, cost: ", simulation_cost);
+      }
+      MCT_new ->initialize_agent_ratio(N);
+      OPEN.push_back(MCT_new);
+
+      // if(verbose == -1){
+      //   std::cout<< " - type: generating" <<std::endl;
+      //   std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+      //   std::cout<< "   pId: " 
+      //     << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+      //     << std::endl;
+      //   std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+      //   std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      // }
+    } 
+  }
+
+  while (!is_expired(deadline)) {
+    // if(H_goal != nullptr){
+    //   roll_out_cnt = H_goal->current_make_span;
+    // }
+    // node_budget = H_goal->current_make_span;
+    loop_cnt += 1;
+
+    // do not pop here!
+    auto MCT_NODE =  MCT_selection(OPEN);// high-level node
+    if(MCT_NODE == nullptr){
+      break;
+    }
+    // std::cout << "Selecting node with ID: " << MCT_NODE->node_id << " ;" <<std::endl;
+    auto H  = MCT_NODE->hNode; 
+    // std::cout << "#Nodes in Queue: " << OPEN.size() <<" #Node ID: "<< MCT_NODE->node_id << " UTC Value: " << MCT_NODE->compute_uct_value() << std::endl ;
+
+    if (H->search_tree.empty()) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+    // check lower bounds
+    if (MCT_NODE->curr_g_value >= min_f_cost) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+
+    // if(verbose == -1){
+    //   std::cout<< " - type: expanding" <<std::endl;
+    //   std::cout<< "   id: "<< MCT_NODE->node_id <<std::endl;
+    //   std::cout<< "   pId: " 
+    //         << (MCT_NODE->parent == nullptr ? "null" : std::to_string(MCT_NODE->parent->node_id)) 
+    //         << std::endl;
+    //   std::cout<< "   visits: "<< MCT_NODE->visits<<std::endl;
+    //   std::cout<< "   reward: "<< MCT_NODE->reward <<std::endl;
+    //   print_utc_value(OPEN);
+    // }
+
+    // check goal condition
+    if ( is_same_config(H->C, ins->goals)) {
+      min_f_cost = MCT_NODE->curr_g_value;
+      best_mct_node = MCT_NODE;
+      MCT_NODE -> completed_node = true;
+      solver_info(1, "found solution, cost: ", min_f_cost);
+      // std::cout<<" aaaaa"<<std::endl;
+      continue;
+    }
+
+
+    // create successors at the low-level search
+    MCTNode* MCT_new  = MCT_Learn_order_to_branch(C_new, MCT_NODE);
+    if(MCT_new == nullptr){
+      MCT_backpropagate(MCT_NODE,1,0,1);
+      continue;
+    }else{
+      // auto simulation_cost = Lacam_simulator(MCT_new->hNode, H_goal, EXPLORED, 
+        // false, node_budget, MCT_NODE->agent_ratio);
+      auto simulation_cost = run_completed_lacam(MCT_new->hNode,MCT_NODE->agent_ratio,EXPLORED,H_goal);
+      if(simulation_cost  == -1){
+        MCT_backpropagate(MCT_new,1,0,1);
+      }else{
+        simulation_cost += MCT_new->curr_g_value;
+        MCT_backpropagate(MCT_new,1,simulation_cost,0);
+        minMaxStats.update(simulation_cost);
+        if(min_f_cost > simulation_cost){
+          min_f_cost = simulation_cost;
+          best_mct_node = MCT_new;
+          solver_info(1, "found solution, cost: ", min_f_cost);
+          solution = std::vector<Config>();
+          auto H = H_goal;
+          while(H != nullptr ){
+            solution.push_back(H->C);
+            H = H->parent;
+          }
+        }
+      }
+
+      MCT_new ->initialize_agent_ratio(N);
+      OPEN.push_back(MCT_new); 
+      // if(verbose == -1){
+      //   std::cout<< " - type: generating" <<std::endl;
+      //   std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+      //   std::cout<< "   pId: " 
+      //     << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+      //     << std::endl;
+      //   std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+      //   std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      // }
+    } 
+    // }
+  }
+  // for( int i = 1 ; i < 11; i ++){
+  //   std::cout<< OPEN[i]->visits << std::endl; 
+  // }
+
+  // std::cout<< "SEARCH ENDED" <<std::endl;
+  // std::cout<< minMaxStats.minimum<<std::endl;
+  // std::cout<< minMaxStats.maximum <<std::endl;
+  // std::cout<< "Simulation times: "<< simulation_times <<std::endl;
+  // std::cout<< "Walk back times: "<< walk_back_times <<std::endl;
+  // backtrack
+  if(best_mct_node->parent != nullptr){
+    auto H = best_mct_node->parent;
+    while(H != nullptr ){
+      solution.push_back(H->hNode->C);
+      H = H->parent;
+    }
+  }
+  if(solution.size() != 0){
+    std::reverse(solution.begin(), solution.end());
+  }
+  // std::cout<< "rewrite_calls: "<< rewrite_calls <<std::endl; 
+  // std::cout<< "sample_times"<< sampleing_times <<std::endl; 
+  // print result
+  if (best_mct_node  != nullptr && OPEN.empty()) {
+    solver_info(1, "solved optimally, objective: ", objective);
+  } else if (best_mct_node  != nullptr) {
+    solver_info(1, "solved sub-optimally, objective: ", objective);
+  } else if (OPEN.empty()) {
+    solver_info(1, "no solution");
+  } else {
+    solver_info(1, "timeout");
+  }
+
+  // logging
+  additional_info +=
+      "optimal=" + std::to_string(best_mct_node != nullptr && OPEN.empty()) + "\n";
+  additional_info += "objective=" + std::to_string(objective) + "\n";
+  additional_info += "loop_cnt=" + std::to_string(loop_cnt) + "\n";
+  additional_info += "num_node_gen=" + std::to_string(OPEN.size()) + "\n";
+
+
+  // save to tree file 
+  if(tree_file != "none"){
+    saveTree(tree_file);
+  }
+
+  // memory management
+  for (auto a : A) delete a;
+  for (auto itr : OPEN){
+    delete itr;
+  } 
+
+  return solution;
+}
+
+
+
+
+
+Solution Planner::MCT_lacam(std::string& additional_info)
+{
+  // setup agents
+  for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+
+  // setup search
+  auto OPEN = std::vector<MCTNode*>();
+  auto EXPLORED = std::unordered_map<Config, HNode*, ConfigHasher>();
+  auto H_init = new HNode(ins->starts, D, nullptr, 0, get_h_value(ins->starts));
+  H_init->setNodeID(global_node_id);
+  global_node_id ++;
+  global_order = H_init->order;
+  global_MCT_node_id = 1;
+
+  
+  auto MCT_init = new MCTNode(nullptr,H_init,global_MCT_node_id);
+  global_MCT_node_id ++; 
+  H_init->setMakeSpan(0);
+  OPEN.push_back(MCT_init);
+  MCT_init->initialize_agent_ratio(N);
+  EXPLORED[H_init->C] = H_init;
+  uint roll_out_cnt =  2 * get_makespan_lower_bound(ins->starts);
+  uint makespan = get_makespan_lower_bound(ins->starts);
+  minMaxStats = MinMaxStats();
+  uint min_f_cost = std::numeric_limits<uint>::max();
+
+
+  std::vector<Config> solution;
+  auto C_new = Config(N, nullptr);  // for new configuration
+  HNode* H_goal = nullptr;          // to store goal node
+  
+  
+  // auto r = Lacam_simulator(MCT_init->hNode, H_goal, EXPLORED, true, 0,MCT_init->agent_ratio);
+  
+  const auto H_copy = new HNode(
+    H_init->C, D, nullptr, H_init->g, H_init->h);
+  H_copy->set_priority_and_order(H_init->order);// Create a non-const copy
+  H_copy->reordering(N, D);
+  
+  auto r = run_completed_lacam(H_copy,MCT_init->agent_ratio);
+  // Lacam_simulator(MCT_init->hNode, H_goal, EXPLORED, true, 0,MCT_init->agent_ratio);
+  if(r  == -1){
+    MCT_backpropagate(MCT_init,1,0,1);
+  }else{
+    MCT_backpropagate(MCT_init,1,r,0);
+    minMaxStats.update(r);
+    if(min_f_cost > r){
+      min_f_cost = r;
+      // std::cout<< r << std::endl;
+      solver_info(1, "found solution, cost: ", min_f_cost);
+    }
+  }
+
+  if(verbose == -1){
+    std::cout<< "version: 1.4.0\n";
+    std::cout<< "events:\n";
+    std::cout<< " - type: expanding" <<std::endl;
+    std::cout<< "   id: "<< MCT_init->node_id <<std::endl;
+    std::cout<< "   pId: " 
+          << (MCT_init->parent == nullptr ? "null" : std::to_string(MCT_init->parent->node_id)) 
+          << std::endl;
+    std::cout<< "   visits: "<< MCT_init->visits<<std::endl;
+    std::cout<< "   reward: "<< MCT_init->reward <<std::endl;
+    print_utc_value(OPEN);
+  }
+  
+  // uint node_budget = H_goal->current_make_span;
+  // for the sake of MCTS, let's force the root not have k branch factors.
+  for(int i = 0; i < 10; i++){
+    // const auto MCT_new  = MCT_random_successor_generator(C_new, MCT_init, EXPLORED,H_goal);
+    const auto MCT_new  = MCT_Learn_order_to_branch(C_new, MCT_init, EXPLORED,H_goal);
+    if(MCT_new != nullptr){
+      // auto simulation_cost = Lacam_simulator(MCT_new->hNode, H_goal, EXPLORED, 
+      //   false, node_budget,MCT_init->agent_ratio);
+      const auto H_copy = new HNode(
+        MCT_new->hNode->C, D, nullptr, 0, MCT_new->hNode->h);
+      H_copy->set_priority_and_order(MCT_new->hNode->order);// Create a non-const copy
+      H_copy->reordering(N, D);
+      auto simulation_cost = run_completed_lacam(H_copy,MCT_init->agent_ratio);
+      // std::cout<< "Results: "<< results <<std::endl;
+      if(simulation_cost  == -1){
+        MCT_backpropagate(MCT_new,1,0,1);
+      }else{
+        simulation_cost += MCT_new->curr_g_value;
+        MCT_backpropagate(MCT_new,1,simulation_cost,0);
+        minMaxStats.update(simulation_cost);
+        if(min_f_cost > simulation_cost){
+          min_f_cost = simulation_cost;
+          solver_info(1, "found solution, cost: ", min_f_cost);
+        }
+        // solver_info(1, "found solution, cost: ", simulation_cost);
+      }
+      MCT_new ->initialize_agent_ratio(N);
+      OPEN.push_back(MCT_new);
+
+      if(verbose == -1){
+        std::cout<< " - type: generating" <<std::endl;
+        std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+        std::cout<< "   pId: " 
+          << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+          << std::endl;
+        std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+        std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+      }
+    } 
+  }
+
+
+
+  while (!is_expired(deadline)) {
+    // if(H_goal != nullptr){
+    //   roll_out_cnt = H_goal->current_make_span;
+    // }
+    // node_budget = H_goal->current_make_span;
+    loop_cnt += 1;
+
+    // do not pop here!
+    auto MCT_NODE =  MCT_selection(OPEN,H_goal);// high-level node
+    if(MCT_NODE == nullptr){
+      break;
+    }
+    // std::cout << "Selecting node with ID: " << MCT_NODE->node_id << " ;" <<std::endl;
+    auto H  = MCT_NODE->hNode; 
+    // std::cout << "#Nodes in Queue: " << OPEN.size() <<" #Node ID: "<< MCT_NODE->node_id << " UTC Value: " << MCT_NODE->compute_uct_value() << std::endl ;
+
+    if (H->search_tree.empty()) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+    // check lower bounds
+    if (H_goal != nullptr && H->f >= H_goal->f) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+
+    if(verbose == -1){
+      std::cout<< " - type: expanding" <<std::endl;
+      std::cout<< "   id: "<< MCT_NODE->node_id <<std::endl;
+      std::cout<< "   pId: " 
+            << (MCT_NODE->parent == nullptr ? "null" : std::to_string(MCT_NODE->parent->node_id)) 
+            << std::endl;
+      std::cout<< "   visits: "<< MCT_NODE->visits<<std::endl;
+      std::cout<< "   reward: "<< MCT_NODE->reward <<std::endl;
+      print_utc_value(OPEN);
+    }
+    // std::cout<< "level: "<<H->f <<std::endl;
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      MCT_NODE -> completed_node = true;
+      continue;
+    }
+
+
+    // create successors at the low-level search
+    // MCTNode* MCT_new = MCT_random_successor_generator(C_new, MCT_NODE, EXPLORED,H_goal);
+    // for(int i = 0; i < 5; i++){
+      MCTNode* MCT_new  = MCT_Learn_order_to_branch(C_new, MCT_NODE, EXPLORED,H_goal);
+      if(MCT_new == nullptr){
+        MCT_backpropagate(MCT_NODE,1,0,1);
+        continue;
+      }else{
+        // auto simulation_cost = Lacam_simulator(MCT_new->hNode, H_goal, EXPLORED, 
+          // false, node_budget, MCT_NODE->agent_ratio);
+        
+        const auto H_copy = new HNode(
+          MCT_new->hNode->C, D, nullptr, 0, MCT_new->hNode->h);
+        H_copy->set_priority_and_order(MCT_new->hNode->order);// Create a non-const copy
+        H_copy->reordering(N, D);
+        auto simulation_cost = run_completed_lacam(H_copy,MCT_NODE->agent_ratio);
+      
+          
+        if(simulation_cost  == -1){
+          MCT_backpropagate(MCT_new,1,0,1);
+        }else{
+          simulation_cost += MCT_new->curr_g_value;
+          MCT_backpropagate(MCT_new,1,simulation_cost,0);
+          minMaxStats.update(simulation_cost);
+          if(min_f_cost > simulation_cost){
+            min_f_cost = simulation_cost;
+            solver_info(1, "found solution, cost: ", min_f_cost);
+          }
+          // solver_info(1, "found solution, cost: ", simulation_cost);
+        }
+        MCT_new ->initialize_agent_ratio(N);
+        OPEN.push_back(MCT_new); 
+        if(verbose == -1){
+          std::cout<< " - type: generating" <<std::endl;
+          std::cout<< "   id: "<< MCT_new->node_id <<std::endl;
+          std::cout<< "   pId: " 
+            << (MCT_new->parent == nullptr ? "null" : std::to_string(MCT_new->parent->node_id)) 
+            << std::endl;
+          std::cout<< "   visits: "<< MCT_new->visits<<std::endl;
+          std::cout<< "   reward: "<< MCT_new->reward <<std::endl;
+        }
+      } 
+    // }
+  }
+  // for( int i = 1 ; i < 11; i ++){
+  //   std::cout<< OPEN[i]->visits << std::endl; 
+  // }
+
+  // std::cout<< "SEARCH ENDED" <<std::endl;
+  // std::cout<< minMaxStats.minimum<<std::endl;
+  // std::cout<< minMaxStats.maximum <<std::endl;
+  // std::cout<< "Simulation times: "<< simulation_times <<std::endl;
+  // std::cout<< "Walk back times: "<< walk_back_times <<std::endl;
+  // backtrack
+  if (H_goal != nullptr) {
+    auto H = H_goal;
+    while (H != nullptr) {
+      solution.push_back(H->C);
+      H = H->parent;
+    }
+    std::reverse(solution.begin(), solution.end());
+  }
+
+  // std::cout<< "rewrite_calls: "<< rewrite_calls <<std::endl; 
+  // std::cout<< "sample_times"<< sampleing_times <<std::endl; 
+  // print result
+  if (H_goal != nullptr && OPEN.empty()) {
+    solver_info(1, "solved optimally, objective: ", objective);
+  } else if (H_goal != nullptr) {
+    solver_info(1, "solved sub-optimally, objective: ", objective);
+  } else if (OPEN.empty()) {
+    solver_info(1, "no solution");
+  } else {
+    solver_info(1, "timeout");
+  }
+
+  // logging
+  additional_info +=
+      "optimal=" + std::to_string(H_goal != nullptr && OPEN.empty()) + "\n";
+  additional_info += "objective=" + std::to_string(objective) + "\n";
+  additional_info += "loop_cnt=" + std::to_string(loop_cnt) + "\n";
+  additional_info += "num_node_gen=" + std::to_string(EXPLORED.size()) + "\n";
+
+
+  // save to tree file 
+  if(tree_file != "none"){
+    saveTree(tree_file);
+  }
+
+  // memory management
+  for (auto a : A) delete a;
+  for (auto itr : EXPLORED) delete itr.second;
+
+  return solution;
+}
+
+
+
+int Planner::Lacam_simulator(HNode* H_init, 
+  HNode*& H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, bool first_run,
+   int nodes_budget,std::vector<double>& agent_ratio){
+  // This function is used to simulate the search process for nodes_budget number of nodes.
+  // we intend to find the path cost from H_init to H_goal. 
+  HNode* min_h_node = nullptr;
+  // std::cout<< "Simulation started" <<std::endl;
+  // std::cout<< nodes_budget <<std::endl;
+  uint path_cost = std::numeric_limits<uint>::max();
+  // setup search
+  auto OPEN = std::stack<HNode*>();
+  auto Connection_config = std::unordered_map<Config, HNode*, ConfigHasher>();
+  Connection_config[H_init->C] = H_init;
+  H_init->cached_g = H_init->g; 
+
+  OPEN.push(H_init);
+  auto C_new = Config(N, nullptr);
+  uint initial_g_value = H_init->g;
+
+  int number_of_nodes_expanded = 0;
+  simulation_times ++;
+  while ( first_run || nodes_budget > 0) {
+    nodes_budget --;
+    if(OPEN.empty()){
+      // std::cout<<"OPEN is empty"<<std::endl;
+      break;
+    }
+    // do not pop here!
+    auto H = OPEN.top();  // high-level node
+    if(min_h_node == nullptr){
+        min_h_node = H;
+    }else{
+      if(min_h_node->h > H->h){
+        min_h_node = H ;
+      }else if(min_h_node->h == H->h){
+        min_h_node->f < H->f ? min_h_node = min_h_node : min_h_node = H;
+      }
+    }
+
+    // low-level search end
+    if (H->search_tree.empty()) {
+      OPEN.pop();
+      continue;
+    }
+
+    // check lower bounds
+    if (H_goal != nullptr && H->f >= H_goal->f) {
+      OPEN.pop();
+      continue;
+    }
+
+    // if(H->node_width > 20 && !first_run){
+    //   // std::cout<< "Node width is too large" <<std::endl;
+    //   OPEN.pop();
+    //   continue;
+    // }
+    // check goal condition
+    if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
+      // first time to run the simulation, we find the goal node.
+      H_goal = H;
+      solver_info(1, "solver find goal: cost -> ", H->g);
+
+      std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+      HNode* current = H_goal;
+      while (current != H_init) {
+        get_edge_cost_per_agent(agent_ratio,current->C,current->simulation_parent->C);
+        current = current->simulation_parent;
+      }
+      compute_agent_increase_ratio(agent_ratio, H_init->C, H_goal->C);
+
+      return H->g - initial_g_value;
+    }
+
+    // create successors at the low-level search
+    auto L = H->search_tree.front();
+    H->search_tree.pop();
+    expand_lowlevel_tree(H, L);
+    H->node_width += 1;
+    // create successors at the high-level search
+    const auto res = get_new_config(H, L);
+    delete L;  // free
+    if (!res) {
+      // std::cout<< "Simulation Stucked" <<std::endl;
+      continue;
+    }
+    // create new configuration
+    for (auto a : A) C_new[a->id] = a->v_next;
+
+    // check explored list
+    const auto iter = EXPLORED.find(C_new);
+    if (iter != EXPLORED.end()) {
+      // std::cout<< "Node found in the tree" <<std::endl;
+      // case found
+      int find_goal = rewrite_find_goal(H, iter->second, H_goal, OPEN);
+      // iter->second->set_simulation_parent( H );
+      // iter->second->set_simulation_parent( H );
+      if(find_goal != -1){
+        // find better path, return now. 
+
+        std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+        HNode* current = H_goal;
+        while (current != H_init) {
+          get_edge_cost_per_agent(agent_ratio,current->C,current->simulation_parent->C);
+          current = current->simulation_parent;
+        }
+        compute_agent_increase_ratio(agent_ratio, H_init->C, H_goal->C);
+
+        return find_goal - initial_g_value;
+      }else{
+        //set cached g value.
+        if(Connection_config.find(C_new) != Connection_config.end()){
+          if(Connection_config[C_new]->cached_g > H->g + get_edge_cost(H->C, C_new)){
+            Connection_config[C_new]->cached_g = H->g + get_edge_cost(H->C, C_new);
+          } 
+        }else{
+          Connection_config[C_new] = iter->second;
+          iter->second->cached_g = H->g + get_edge_cost(H->C, C_new);
+          // clean the constrain when first time see.
+          iter->second->search_tree = std::queue<LNode*>();
+          iter->second->search_tree.push(new LNode());
+        }
+      }
+      if (H_goal == nullptr || iter->second->f < H_goal->f){
+        update_ordering(H, iter->second, N, D);
+        OPEN.push(iter->second);
+      } 
+    } else {
+      // insert new search node
+      const auto H_new = new HNode(
+          C_new, D, H, H->g + get_edge_cost(H->C, C_new), get_h_value(C_new));
+      H_new->setNodeID(global_node_id);
+      global_node_id ++;
+      EXPLORED[H_new->C] = H_new;
+      H_new->set_simulation_parent( H );
+      H_new->setMakeSpan(H->current_make_span + 1);
+      if (H_goal == nullptr || H_new->f < H_goal->f){
+        OPEN.push(H_new);
+        number_of_nodes_expanded ++;
+      }
+    }
+  }
+
+  // get_h_value_between_config(agent_h_cost,min_h_node->C,H_init->C);
+  if(min_h_node != H_init){
+    // std::cout<< " Start back tracking" << std::endl;
+    std::fill(agent_ratio.begin(), agent_ratio.end(), 0);
+    HNode* current = min_h_node;
+    while (current != H_init) {
+      get_edge_cost_per_agent(agent_ratio,current->C,current->simulation_parent->C);
+      current = current->simulation_parent;
+    }
+    compute_agent_increase_ratio(agent_ratio, H_init->C, min_h_node->C);
+    // std::cout<< " End back tracking" << std::endl;  
+  }
+  return min_h_node->f - initial_g_value;
+  // if(Connection_config.size() == 1){
+  //   uint connected_path_cost = Config_A_Star_Search(Connection_config);
+  //   return connected_path_cost - initial_g_value;
+  // }else if(Connection_config.size() > 1){
+  //   uint connected_path_cost = Config_A_Star_Search(Connection_config);
+  //   return connected_path_cost - initial_g_value;
+  // }
+  // if(Connection_config.size() >= 1){
+  //   uint connected_path_cost = Config_A_Star_Search(Connection_config);
+  //   if (connected_path_cost == H_goal->g + 2*initial_g_value){
+  //     walk_back_times ++;
+  //   }
+  //   return connected_path_cost - initial_g_value;
+  // }
+  // if(Connection_config.size() == 1){
+  //   // only does backward connection.
+  //   // best path are from h_init to h_s, and h_s to h_goal.
+  //   walk_back_times++;
+  //   // return H_goal->g + initial_g_value;
+  //   return -1;
+  // }else if(Connection_config.size() > 1){
+  //   // std::cout<<"Multiple connections"<<std::endl;
+  //   uint connected_path_cost = Config_A_Star_Search(Connection_config);
+  //   return connected_path_cost - initial_g_value;
+  // }
+  // simulation failed to find the goal node.
+  return -1 ;
+}
+
+
+uint Planner::Config_A_Star_Search(std::unordered_map<Config, HNode*, ConfigHasher>& Connection_config) {
+  struct CompareHNode {
+    bool operator()(HNode* const& a, HNode* const& b) const {
+        return a->cached_g > b->cached_g; // Min-heap based on 'f' value
+    }
+  };
+
+  // std::cout<< "A* search started" <<std::endl;
+  uint min_path_cost = std::numeric_limits<uint>::max();
+
+  // Clean tentative_g_cost
+  std::fill(tentative_g_cost.begin(), tentative_g_cost.end(), std::numeric_limits<uint>::max());
+
+  // Resize tentative_g_cost if necessary
+  if (global_node_id >= tentative_g_cost.size()) {
+      tentative_g_cost.resize(global_node_id + 1, std::numeric_limits<uint>::max());
+  }
+
+  // Priority queue for open set
+  std::priority_queue<HNode*, std::vector<HNode*>, CompareHNode> open_set;
+
+  // Insert all nodes in Connection_config into the priority queue
+  for (auto& entry : Connection_config) {
+      HNode* start_node = entry.second;
+      tentative_g_cost[start_node->node_id] = start_node->cached_g;
+      start_node->cached_g += start_node->h;
+      open_set.push(start_node);
+  }
+
+  // Perform A* search
+  while (!open_set.empty()) {
+      HNode* current = open_set.top();
+      open_set.pop();
+
+      // Check if we have reached the goal
+      if (is_same_config(current->C, ins->goals)) {
+          return tentative_g_cost[current->node_id]; // Return the cost to reach the goal
+      }
+
+      std::vector<HNode*> successors(current->neighbor.begin(), current->neighbor.end());
+      if (current->parent != nullptr) {
+          successors.push_back(current->parent); // Include the parent node
+      }
+
+      for (HNode* neighbor : successors)  {
+          uint tentative_g_cost_value = tentative_g_cost[current->node_id] + get_edge_cost(current, neighbor);
+          // If this path to the neighbor is better, update it
+          if (tentative_g_cost_value < tentative_g_cost[neighbor->node_id]) {
+              tentative_g_cost[neighbor->node_id] = tentative_g_cost_value;
+              neighbor->cached_g = tentative_g_cost_value + neighbor->h;
+              open_set.push(neighbor);
+          }
+      }
+  }
+  // if(min_path_cost == std::numeric_limits<uint>::max()){
+  //   std::cout<< "A* search failed" <<std::endl;
+  // }
+  // std::cout<< "A* search ended" <<std::endl;
+  // If the goal is not reachable, return a large value
+  return min_path_cost;
+}
+
+
+
+
+
 
 Solution Planner::MCT_solve(std::string& additional_info)
 {
@@ -977,6 +3456,44 @@ std::pair<double,int> Planner::downward_rollout_policy(HNode* H, HNode*& H_goal,
 
 // }
 
+
+void Planner::rewrite_backpropagate(HNode* H_from, HNode* H_to, HNode* H_goal,
+                      std::stack<HNode*>& OPEN, HNode* H_init, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED )
+{
+  // update neighbors
+  H_from->neighbor.insert(H_to);
+
+  // Dijkstra update
+  std::queue<HNode*> Q({H_from});  // queue is sufficient
+  while (!Q.empty()) {
+    auto n_from = Q.front();
+    Q.pop();
+    for (auto n_to : n_from->neighbor) {
+      auto g_val = n_from->g + get_edge_cost(n_from->C, n_to->C);
+      if (g_val < n_to->g) {
+        if (n_to == H_goal){
+          solver_info(1, "rewrite cost update: ", n_to->g, " -> ", g_val);
+          n_to->g = g_val;
+          n_to->f = n_to->g + n_to->h;
+          n_to->parent = n_from;
+          backpropagate_order(n_to);
+          increase_weight_map(n_to,true);
+          pick_restart_nodes(OPEN);
+          return;
+        }
+        n_to->g = g_val;
+        n_to->f = n_to->g + n_to->h;
+        n_to->parent = n_from;
+        n_to->set_visit_times(node_visit_times);
+        Q.push(n_to);
+        if (H_goal != nullptr && n_to->f < H_goal->f) {
+          OPEN.push(n_to);
+        }
+      }
+    }
+  }
+}
+
 void Planner::rewrite(HNode* H_from, HNode* H_to, HNode* H_goal,
                       std::stack<HNode*>& OPEN)
 {
@@ -991,30 +3508,77 @@ void Planner::rewrite(HNode* H_from, HNode* H_to, HNode* H_goal,
     for (auto n_to : n_from->neighbor) {
       auto g_val = n_from->g + get_edge_cost(n_from->C, n_to->C);
       if (g_val < n_to->g) {
-        if (n_to == H_goal)
+        if (n_to == H_goal){
           solver_info(1, "cost update: ", n_to->g, " -> ", g_val);
+        }
         n_to->g = g_val;
         n_to->f = n_to->g + n_to->h;
         n_to->parent = n_from;
-
-        for (size_t i = 0; i < N; ++i) {
-          auto v_i_from = n_from->C[i];
-          auto v_i_to = n_to->C[i];
-          // check connectivity
-          if (v_i_from != v_i_to &&
-              std::find(v_i_to->neighbor.begin(), v_i_to->neighbor.end(),
-                        v_i_from) == v_i_to->neighbor.end()) {
-            std::cout<< "here !!!" <<std::endl;
-          }
-        }
         Q.push(n_to);
         if (H_goal != nullptr && n_to->f < H_goal->f) {
           OPEN.push(n_to);
-          record_highlevel_node(n_to,false,false);
         }
       }
     }
   }
+}
+void Planner::rewrite_no_push(HNode* H_from, HNode* H_to, HNode* H_goal)
+{
+  // update neighbors
+  H_from->neighbor.insert(H_to);
+  // Dijkstra update
+  std::queue<HNode*> Q({H_from});  // queue is sufficient
+  while (!Q.empty()) {
+    auto n_from = Q.front();
+    Q.pop();
+    for (auto n_to : n_from->neighbor) {
+      auto g_val = n_from->g + get_edge_cost(n_from->C, n_to->C);
+      if (g_val < n_to->g) {
+        if (n_to == H_goal){
+          solver_info(1, "Simiulation find goal: ", n_to->g, " -> ", g_val);
+        }
+        n_to->g = g_val;
+        n_to->f = n_to->g + n_to->h;
+        n_to->parent = n_from;
+        n_to->setMakeSpan(n_from->current_make_span + 1);
+        Q.push(n_to);
+      }
+    }
+  }
+}
+
+int Planner::rewrite_find_goal(HNode* H_from, HNode* H_to, HNode* H_goal,
+                      std::stack<HNode*>& OPEN)
+{
+  // update neighbors
+  H_from->neighbor.insert(H_to);
+  
+  int find_goal = -1;
+  // Dijkstra update
+  std::queue<HNode*> Q({H_from});  // queue is sufficient
+  while (!Q.empty()) {
+    auto n_from = Q.front();
+    Q.pop();
+    for (auto n_to : n_from->neighbor) {
+      auto g_val = n_from->g + get_edge_cost(n_from->C, n_to->C);
+      if (g_val < n_to->g) {
+        if (n_to == H_goal){
+          solver_info(1, "Simiulation find goal: ", n_to->g, " -> ", g_val);
+          find_goal = H_goal->f;
+        }
+        n_to->g = g_val;
+        n_to->f = n_to->g + n_to->h;
+        n_to->parent = n_from;
+        n_to->set_simulation_parent(n_from);
+        n_to->setMakeSpan(n_from->current_make_span + 1);
+        Q.push(n_to);
+        if (H_goal != nullptr && n_to->f < H_goal->f) {
+          OPEN.push(n_to);
+        }
+      }
+    }
+  }
+  return find_goal;
 }
 
 
@@ -1030,6 +3594,49 @@ void Planner::record_highlevel_node(HNode* H_node, bool expanded, bool contain_t
 }
 
 
+void Planner::compute_agent_increase_ratio(std::vector<double>& agent_ratio, 
+    const Config& C1, const Config& C2){
+    for (uint i = 0; i < N; ++i) {
+      agent_ratio[i] = agent_ratio[i] / (D.get(i, C1[i]) - D.get(i, C2[i]));
+      int a = D.get(i, C2[i]);
+      int b = D.get(i, C1[i]);
+      bool c = 0;
+    }
+}
+
+void Planner::get_edge_cost_per_agent(std::vector<double>& agent_cost, 
+  const Config& C1, const Config& C2)
+{
+  if (objective == OBJ_SUM_OF_LOSS) {
+    for (uint i = 0; i < N; ++i) {
+      if (C1[i] != ins->goals[i] || C2[i] != ins->goals[i]) {
+        agent_cost[i] += 1;
+      }
+    }
+  }else{
+      // default: makespan
+    for (uint i = 0; i < N; ++i) {
+      agent_cost[i] += 1;
+    }
+  }
+}
+
+
+// void Planner::get_edge_cost_per_agent(std::vector<double>& agent_cost, const Config& C1, const Config& C2)
+// {
+//   if (objective == OBJ_SUM_OF_LOSS) {
+//     for (uint i = 0; i < N; ++i) {
+//       if (C1[i] != ins->goals[i] || C2[i] != ins->goals[i]) {
+//         agent_cost[i] += 1;
+//       }
+//     }
+//   }else{
+//       // default: makespan
+//     for (uint i = 0; i < N; ++i) {
+//       agent_cost[i] += 1;
+//     }
+//   }
+// }
 
 uint Planner::get_edge_cost(const Config& C1, const Config& C2)
 {
@@ -1078,8 +3685,31 @@ int Planner::get_makespan_lower_bound(const Config& C)
   }
   return c;
 }
+void Planner::expand_lowlevel_tree_avoid_agent(HNode* H, LNode* L,std::unordered_set<int>& fixed_agents)
+{
+  // std::cout<<"Expanding node:"<<std::endl; 
+  if (L->depth >= N) return;
+  // std::cout<<L->depth<<std::endl;
+  while(fixed_agents.find( H->order[L->depth]) != fixed_agents.end()){
+    //
+    L->depth++;
+    if(L->depth >= N) return;
+  }
+  
+  const auto i = H->order[L->depth];
+  auto C = H->C[i]->neighbor;
+  C.push_back(H->C[i]);
+  // randomize
+  if (MT != nullptr) std::shuffle(C.begin(), C.end(), *MT);
+  // insert
+  // Sometime may generate 5 actions include waiting. 
+  for (auto v : C) {
+    auto n  = new LNode(L, i, v);
+    // std::cout<< *n << std::endl;
+    H->search_tree.push(n);
+  }
 
-
+}
 void Planner::expand_lowlevel_tree(HNode* H, LNode* L)
 {
   // std::cout<<"Expanding node:"<<std::endl; 
@@ -1100,6 +3730,58 @@ void Planner::expand_lowlevel_tree(HNode* H, LNode* L)
 
 }
 
+
+
+
+// bool Planner::get_new_config_with_path_constraint(HNode* H, LNode* L)
+// {
+//   // setup cache
+//   for (auto a : A) {
+//     // clear previous cache
+//     if (a->v_now != nullptr && occupied_now[a->v_now->id] == a) {
+//       occupied_now[a->v_now->id] = nullptr;
+//     }
+//     if (a->v_next != nullptr) {
+//       occupied_next[a->v_next->id] = nullptr;
+//       a->v_next = nullptr;
+//     }
+
+//     // set occupied now
+//     a->v_now = H->C[a->id];
+//     occupied_now[a->v_now->id] = a;
+//   }
+//   // std::cout<< "Start adding constraints: " << std::endl; 
+//   // add constraints
+//   auto SIZE  = L->who.size();
+//   for (uint k = 0; k < SIZE ; ++k) {
+//     const auto i = L->who[k];        // agent
+//     const auto l = L->where[k]->id;  // loc
+//     // check vertex collision
+//     if (occupied_next[l] != nullptr) return false;
+//     // check swap collision
+//     auto l_pre = H->C[i]->id;
+//     if (occupied_next[l_pre] != nullptr && occupied_now[l] != nullptr &&
+//         occupied_next[l_pre]->id == occupied_now[l]->id)
+//       return false;
+
+//     // set occupied_next
+//     A[i]->v_next = L->where[k];
+//     occupied_next[l] = A[i];
+//   }
+
+
+//   // perform PIBT
+//   for (auto k : H->order) {
+//     auto a = A[k];
+//     if (a->v_next == nullptr && !funcPIBT(a)) {
+//       return false;  // planning failure
+//     }
+//   }
+
+//   return true;
+// }
+
+
 bool Planner::get_new_config(HNode* H, LNode* L)
 {
   // setup cache
@@ -1119,27 +3801,39 @@ bool Planner::get_new_config(HNode* H, LNode* L)
   }
   // std::cout<< "Start adding constraints: " << std::endl; 
   // add constraints
-  for (uint k = 0; k < L->depth; ++k) {
+  // if(L->depth != L->who.size()){
+  //   std::cout<< "Error: L->depth != L->who.size() "<< std::endl; 
+  // }
+  for (uint k = 0; k < L->who.size(); ++k) {
     const auto i = L->who[k];        // agent
     const auto l = L->where[k]->id;  // loc
     // check vertex collision
-    if (occupied_next[l] != nullptr) return false;
+    if (occupied_next[l] != nullptr) {
+      // std::cout<<" fall into vertex collision: "<< std::endl;
+      return false;
+    }
     // check swap collision
     auto l_pre = H->C[i]->id;
     if (occupied_next[l_pre] != nullptr && occupied_now[l] != nullptr &&
-        occupied_next[l_pre]->id == occupied_now[l]->id)
+        occupied_next[l_pre]->id == occupied_now[l]->id){
+      // std::cout<<" fall into swap collision: "<< std::endl;
       return false;
+        }
 
     // set occupied_next
     A[i]->v_next = L->where[k];
     occupied_next[l] = A[i];
   }
 
+
   // perform PIBT
   for (auto k : H->order) {
     auto a = A[k];
-    if (a->v_next == nullptr && !funcPIBT(a)) return false;  // planning failure
+    if (a->v_next == nullptr && !funcPIBT(a)) {
+      return false;  // planning failure
+    }
   }
+
   return true;
 }
 
@@ -1158,10 +3852,24 @@ bool Planner::funcPIBT(Agent* ai)
   C_next[i][K] = ai->v_now;
 
   // sort
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //           [&](Vertex* const v, Vertex* const u) {
+  //             return D.get(i, v) + tie_breakers[v->id] <
+  //                    D.get(i, u) + tie_breakers[u->id];
+  //           });
+  // PIBT_D.compare_edge_map();
   std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
             [&](Vertex* const v, Vertex* const u) {
-              return D.get(i, v) + tie_breakers[v->id] <
-                     D.get(i, u) + tie_breakers[u->id];
+              // double a = D.get(i, v); 
+              // double b = D.get(i, u);
+              // double e = D.get(i, v); 
+              // double f = D.get(i, u);
+              // return (double)D.get(i, v) + tie_breakers[v->id] <
+              // (double) D.get(i, u) + tie_breakers[u->id];
+              return PIBT_D.get_heuristic(i, v) + tie_breakers[v->id] <
+              PIBT_D.get_heuristic(i, u) + tie_breakers[u->id];
+              // return PIBT_D.get_individual_heuristic(i, v) + tie_breakers[v->id] <
+              // PIBT_D.get_individual_heuristic(i, u) + tie_breakers[u->id];
             });
 
   Agent* swap_agent = swap_possible_and_required(ai);

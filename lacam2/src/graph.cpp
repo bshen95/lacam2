@@ -144,7 +144,11 @@ bool is_same_config(const Config& C1, const Config& C2)
 {
   const auto N = C1.size();
   for (size_t i = 0; i < N; ++i) {
-    if (C1[i]->id != C2[i]->id) return false;
+    if (C1[i]->id != C2[i]->id){
+      // std::cout << "C1[" << i << "] = " << C1[i]->id << ", C2[" << i
+      //           << "] = " << C2[i]->id << std::endl;
+      return false;
+    } 
   }
   return true;
 }

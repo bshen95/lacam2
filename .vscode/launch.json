@@ -9,10 +9,10 @@
             "args": [
                 "-v", "3",
                 "-m", "assets/random-32-32-10.map",
-                "-t", "3000",
+                "-t", "6000",
                 "-N", "400",
                 "--objective", "2",
-                "-S", "tree.trace.yaml"
+                "-s", "1",
             ],
             "stopAtEntry": true,
             "cwd": "${workspaceFolder}",

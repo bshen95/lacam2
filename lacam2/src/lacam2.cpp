@@ -6,9 +6,12 @@ Solution solve(const Instance& ins, std::string& additional_info,
 {
   auto planner = Planner(&ins, deadline, MT, verbose, objective, restart_rate, save_tree_file);
   // auto plan = planner.solve(additional_info);
-
-  return planner.MCT_solve(additional_info);
-  // return planner.solve(additional_info);
+  // return planner.MCT_vanilla_lacam(additional_info);
+  // return planner.MCT_multiple_lacam(additional_info);
+  return planner.backpropagate_solve(additional_info);
+  // return planner.MCT_solve(additional_info);
+  // return planner.MCT_lacam(additional_info);
+  // return  planner.solve(additional_info);
 }
 
 
