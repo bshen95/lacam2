@@ -11,6 +11,7 @@
  #include "utils.hpp"
  #include "min_max_stats.hpp"
  #include <unordered_set>
+ #include "q_table.hpp"
  // objective function
  enum Objective { OBJ_NONE, OBJ_MAKESPAN, OBJ_SUM_OF_LOSS };
  std::ostream& operator<<(std::ostream& os, const Objective objective);
@@ -223,6 +224,9 @@
    const uint V_size;  // number o vertices
    DistTable D;
    AstarDistTable PIBT_D;
+
+   std::vector<QTable> Q_tables; // Q-tables for each agent
+
    uint loop_cnt;      // auxiliary
    uint rewrite_calls;   // auxiliary;
    uint sampleing_times;   // auxiliary;
@@ -290,6 +294,17 @@
   Solution MCT_multiple_lacam(std::string& additional_info);
   Solution backpropagate_solve(std::string& additional_info);
   
+  void export_interacted_agents_graph(const std::vector<std::set<int>>& interacted_agents, const std::string& filename);
+  
+  void export_cluster_solution(
+    const std::vector<std::vector<int>>& solution_nodes,
+    const std::vector<std::vector<int>>& depth_clustered_agents,
+    const std::string& filename);
+
+  std::vector<std::set<int>> transitiveClosureAll(const std::vector<std::set<int>>& graph);
+
+  std::vector<int> depth_cluster(const std::vector<std::set<int>>& graph, int start, int input_depth, std::vector<bool>& visited);
+  void build_dependence_graph(HNode* input_H_goal);
   void backpropagate_order(HNode* H_goal);
   void decay_punishment();
 
@@ -308,6 +323,12 @@
   uint run_completed_lacam(HNode* H_init,std::vector<double>& agent_ratio);
   uint run_completed_lacam(HNode* H_init,std::vector<double>& agent_ratio, 
     std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, HNode*& H_goal);
+  
+  void propogate_q_value_k_steps(int agent_id, Vertex* const& v_curr, Vertex* const& v_next, double cost_to_go, int k_steps);
+  double get_q_value(int agent_id, Vertex* const& v_curr, Vertex* const& v_next);
+  void update_q_value(int agent_id, Vertex* const& v_curr, Vertex* const& v_next, double cost_to_go);
+  int get_action(Vertex* const& v_curr, Vertex* const& v_next, int width);
+
   void retrieve_solution(HNode* H_init,std::vector<Config>& solution);
   void add_punishment(HNode* input_H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED); 
   void pick_restart_nodes(std::stack<HNode*>& OPEN);
@@ -345,6 +366,7 @@
   void increase_solution_congestion_cost(HNode* input_H_goal);
   void increase_each_agent_cost(HNode* input_H_goal);
   void increase_weight_map(HNode* input_H_goal, bool is_goal);
+  void learning_Q_value(HNode* input_H_goal,double is_goal);
   void set_individual_congestion_map(HNode* H_init);
 
   

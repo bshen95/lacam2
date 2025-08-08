@@ -27,6 +27,8 @@ void AstarDistTable::setup(const Instance* ins)
     // avoid push back copy;
     // OPEN[i] = pqueue<V_Node, cmp_less_f,min_q>(V_size);
     for (size_t j = 0; j < V_size; ++j) {
+      V_Node_table[i][j].expanded = false;
+      V_Node_table[i][j].in_queue = false;
       V_Node_table[i][j].v= ins->G.V[j];
     }
     auto n = ins->goals[i];
@@ -196,6 +198,7 @@ double AstarDistTable::update_heuristic_table(const Instance* ins, uint i, uint 
 
 double AstarDistTable::get_heuristic(uint i, uint v_id)
 {
+
   if (V_Node_table[i][v_id].expanded){
     return V_Node_table[i][v_id].g;
   } 

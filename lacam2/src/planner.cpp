@@ -1,6 +1,6 @@
 #include "../include/planner.hpp"
 #include <unordered_set>
-
+#include <map>
 LNode::LNode(LNode* parent, uint i, Vertex* v)
     : who(), where(), depth(parent == nullptr ? 0 : parent->depth + 1)
 {
@@ -98,6 +98,7 @@ Planner::Planner(const Instance* _ins, const Deadline* _deadline,
       V_size(ins->G.size()),
       D(DistTable(ins)),
       PIBT_D(AstarDistTable(ins)),
+      Q_tables(N, QTable(ins->G.U.size(), 5, -1)),
       loop_cnt(0),
       C_next(N),
       tie_breakers(V_size, 0),
@@ -132,6 +133,193 @@ void Planner::propagate_order_to_neighbors(HNode* current_node) {
   }
 }
 
+void Planner::build_dependence_graph(HNode* input_H_goal) {
+  std::vector<double> agent_cost(N, 0);
+  std::vector<double> agent_ratio(N, 0);
+  HNode* current = input_H_goal;
+  std::vector<std::vector<int>> solution_nodes = std::vector<std::vector<int>>(N);
+  for (uint i = 0; i < N; ++i) {
+    solution_nodes[i].push_back(ins->goals[i]->index);
+  }
+
+  while (current->parent != nullptr) {
+    get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
+    for(uint i = 0; i < N; ++i) {
+      if(solution_nodes[i].size() == 1 
+      && current->C[i]->index == ins->goals[i]->index){
+        continue; // skip if already at goal
+      }
+      solution_nodes[i].push_back(current->C[i]->index);
+    }
+    current = current->parent;
+  }
+
+  for (uint i = 0; i < N; ++i) {
+    solution_nodes[i].push_back(ins->starts[i]->index);
+    std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
+    agent_ratio[i] = agent_cost[i] / (D.get(i, ins->starts[i]) - D.get(i, input_H_goal->C[i]));
+  }
+
+  std::vector<uint> ranking(N);
+  std::iota(ranking.begin(), ranking.end(), 0);
+  std::sort(ranking.begin(), ranking.end(), [&](uint i, uint j) {
+      return agent_ratio[i] > agent_ratio[j];
+  });
+
+  std::map<std::tuple<int, int>, int> occupancy_map;
+  // Suppose you have: std::vector<std::vector<int>> solution_nodes; // [agent][time] = vertex_index
+  for (int agent_id = 0; agent_id < N; ++agent_id) {
+      for (int t = 0; t < solution_nodes[agent_id].size(); ++t) {
+          int vertex_index = solution_nodes[agent_id][t];
+          occupancy_map[{vertex_index, t}] = agent_id;
+      }
+  }
+
+  std::vector<std::set<int>> interacted_agents(N);
+  for (auto agent_id : ranking) {
+    // process agent_id in order of decreasing agent_ratio
+    for (size_t j = 0; j < solution_nodes[agent_id].size() - 1; ++j) {
+      Vertex* from_v = ins->G.U[solution_nodes[agent_id][j]];
+      Vertex* to_v = ins->G.U[solution_nodes[agent_id][j + 1]];
+      int current_time_step = j; // Assuming j starts from 0, so +1 for time step
+      const auto K = from_v->neighbor.size();
+
+      // get candidates for next locations
+      for (auto k = 0; k < K; ++k) {
+        auto u = from_v->neighbor[k];
+        C_next[agent_id][k] = u;
+        if (MT != nullptr)
+          tie_breakers[u->id] = get_random_float(MT); // set tie-breaker 
+      }
+      C_next[agent_id][K] = from_v;
+
+      std::sort(C_next[agent_id].begin(), C_next[agent_id].begin() + K + 1,
+          [&](Vertex* const v, Vertex* const u) {
+            return D.get(agent_id, v) + tie_breakers[v->id] <
+            D.get(agent_id, u) + tie_breakers[u->id];
+          });
+      
+      // update edge weights
+      int occupied_vertex =  0 ; 
+      for (size_t k = 0; k < K + 1; ++k) {
+        if (C_next[agent_id][k]->index == to_v->index) {
+          occupied_vertex = k;
+          break;
+        }
+      }
+      if( occupied_vertex != 0){
+        // check which adgent occupied the vertex! 
+        for( int i = 0; i < occupied_vertex; i++){
+          int v_index = C_next[agent_id][i]->index;
+          auto edge = std::make_pair(C_next[agent_id][i]->index, current_time_step + 1);
+          if(occupancy_map.find(edge) != occupancy_map.end()){
+            if(occupancy_map[edge] != agent_id){
+              interacted_agents[agent_id].insert(occupancy_map[edge]);
+            }
+          }
+        }
+      }
+    }
+  }
+  transitiveClosureAll(interacted_agents);
+  std::vector<bool> visited(N, false);
+  std::vector<std::vector<int>> depth_clustered_agents;
+  for(auto rank : ranking){
+    if(visited[rank]) continue; // skip if already visited
+    depth_clustered_agents.push_back(depth_cluster(interacted_agents, rank, 1, visited));
+  }
+  export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
+  export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
+  bool a = 0;
+}
+
+std::vector<int> Planner::depth_cluster(const std::vector<std::set<int>>& graph, int start, int input_depth, std::vector<bool>& visited) {
+    std::vector<int> cluster;
+    std::queue<std::pair<int, int>> q; // {node, depth}
+    q.emplace(start, 0);
+    visited[start] = true;
+
+    int visited_count = 0;
+    while (!q.empty()) {
+        auto [node, depth] = q.front(); q.pop();
+        cluster.push_back(node);
+        if (depth == input_depth) continue;
+        if(visited_count == 50) continue; // limit to 50 nodes
+        for (int neighbor : graph[node]) {
+            if (!visited[neighbor]) {
+              visited[neighbor] = true;
+              visited_count++;
+              if(visited_count == 50){
+                break;
+              }
+              q.emplace(neighbor, depth + 1);
+            }
+        }
+    }
+    return cluster;
+}
+
+
+
+// Computes the full transitive closure of a directed graph.
+// Returns a vector where closure[i] is the set of nodes reachable from i.
+std::vector<std::set<int>> Planner::transitiveClosureAll(const std::vector<std::set<int>>& graph) {
+    int n = graph.size();
+    std::vector<std::set<int>> closure(n);
+    std::vector<bool> visited(n);
+
+    // DFS visits all reachable from 'start', marking visited and populating closure[start].
+    std::function<void(int,int)> dfs = [&](int start, int u) {
+        for (int v : graph[u]) {
+            if (!visited[v]) {
+                visited[v] = true;
+                closure[start].insert(v);
+                dfs(start, v);
+            }
+        }
+    };
+
+    // Compute closure for each node
+    for (int i = 0; i < n; ++i) {
+        std::fill(visited.begin(), visited.end(), false);
+        visited[i] = true;
+        dfs(i, i);
+    }
+    return closure;
+}
+
+
+
+
+
+void Planner::export_cluster_solution(
+    const std::vector<std::vector<int>>& solution_nodes,
+    const std::vector<std::vector<int>>& depth_clustered_agents,
+    const std::string& filename)
+{
+    if (depth_clustered_agents.empty()) return;
+    const auto& cluster = depth_clustered_agents[0];
+
+    std::ofstream fout(filename);
+    fout << "agent_id,time_step,vertex_index\n";
+    for (int agent_id : cluster) {
+        for (size_t t = 0; t < solution_nodes[agent_id].size(); ++t) {
+            fout << agent_id << "," << t << "," << solution_nodes[agent_id][t] << "\n";
+        }
+    }
+    fout.close();
+}
+
+void Planner::export_interacted_agents_graph(const std::vector<std::set<int>>& interacted_agents, const std::string& filename) {
+    std::ofstream fout(filename);
+    fout << "src,dst\n";
+    for (size_t agent = 0; agent < interacted_agents.size(); ++agent) {
+        for (int other : interacted_agents[agent]) {
+            fout << agent << "," << other << "\n";
+        }
+    }
+    fout.close();
+}
 
 void Planner::backpropagate_order(HNode* input_H_goal) {
   // return;
@@ -393,8 +581,119 @@ void Planner::record_each_agent_frequency(HNode* input_H_goal){
   reset_congestion_map = true;
 }
 
+void Planner::learning_Q_value(HNode* input_H_goal, double is_goal){
+  struct PairHash {
+    std::size_t operator()(const std::pair<Vertex*, Vertex*>& p) const {
+        return std::hash<int>()(p.first->id) ^ (std::hash<int>()(p.second->id) << 1);
+    }
+  };
+  HNode* current = input_H_goal;
+  // For each agent, track the cost-to-go (steps to goal)
+  std::vector<double> cost_to_go(N, 0.0);
+  std::vector<std::unordered_map<std::pair<Vertex*, Vertex*>, int, PairHash>> edge_mapper(N);
+  if(!is_goal){
+    // use heuristic to fill the value if input is not goal.
+    for (int i = 0; i < N; ++i) {
+      Vertex* v_curr = current->parent->C[i];
+      Vertex* v_next = current->C[i];
+      cost_to_go[i] = get_q_value(i, v_curr, v_next);
+    }
+  }
+
+  std::vector<HNode*> solution_nodes;
+  std::vector<std::vector<Vertex*>> each_agent_solution_nodes(N);
+  // s -> a -> b -> t,  (s -> a, 2)
+  // First, compute the path length for each agent, we'll backtrack and increment cost_to_go for each step
+  while (current->parent != nullptr) {
+    for (int i = 0; i < N; ++i) {
+        if(current->parent->C[i]->index == ins->goals[i]->index && 
+           cost_to_go[i] == 0){
+          // skip if stay at goal; 
+          continue;
+        }
+        Vertex* v_curr = current->parent->C[i];
+        Vertex* v_next = current->C[i];
+        cost_to_go[i] += 1.0;
+        each_agent_solution_nodes[i].push_back(v_curr);
+        // Store the edge and its cost-to-go
+        if(edge_mapper[i].find({v_curr, v_next}) == edge_mapper[i].end()) {
+          edge_mapper[i][{v_curr, v_next}] = cost_to_go[i];
+        }
+    }
+    solution_nodes.push_back(current);
+    current = current->parent;
+  }
+
+  for (int i = 0; i < N; ++i) {
+    for (auto& p : edge_mapper[i]) {
+      // For each edge, update the Q-table.
+      if(p.first.first->index == p.first.second->index){
+        if(p.first.first->index == ins->goals[i]->index){
+          // skip if stay at goal; 
+          continue;
+        }
+      }
+      // try propogate Q value k steps
+      propogate_q_value_k_steps(i, p.first.first, p.first.second, p.second, 5);
+    }
+  }
+  // for (int i = 0; i < N; ++i) {
+  //   // Q_tables[0].print_Q_value_at_state(ins->starts[i]->id);
+  //   // std::vector< std::vector<std::tuple<State, int, double>> > q_records(V_size*2);
+  //   // std::vector< std::vector<std::tuple<State, int, double>> > updated_q_records(V_size*2);
+  //   // for(auto& a : each_agent_solution_nodes[i]){
+  //   //   // std::cout<<"Adding solution node for agent: " << i << " at vertex: " << a << std::endl;
+  //   //   // Q_tables[i].add_solution_node(a);
+  //   //   q_records[a->index] = Q_tables[i].get_q_value_records(a->index);
+  //   // }
+  //   // Q_tables[i].dump_q_table_csv("q_table_agent_" + std::to_string(i) + ".csv");
+  //   for (auto& p : edge_mapper[i]) {
+  //     // For each edge, update the Q-table.
+  //     if(p.first.first->index == p.first.second->index){
+  //       if(p.first.first->index == ins->goals[i]->index){
+  //         // skip if stay at goal; 
+  //         continue;
+  //       }
+  //     }
+  //     // std::cout<<"Updating Q value for agent: " << i << " from "<< p.first.first->index 
+  //             //  << " to " << p.first.second->index << " with cost: " << p.second << std::endl;
+  //     // try propogate Q value k steps
+  //     propogate_q_value_k_steps(i, p.first.first, p.first.second, p.second, 10);
+  //   }
+  //   // for(auto& a : each_agent_solution_nodes[i]){
+  //   //   // std::cout<<"Adding solution node for agent: " << i << " at vertex: " << a << std::endl;
+  //   //   // Q_tables[i].add_solution_node(a);
+  //   //   updated_q_records[a->index] = Q_tables[i].get_q_value_records(a->index);
+  //   // }
+  //   // Q_tables[i].dump_q_table_csv("updated_q_table_agent_" + std::to_string(i) + ".csv");
+  //   // for(int j = 0; j < V_size*2; j++){
+  //   //   if(q_records[j].size() > 0 && updated_q_records[j].size() > 0){
+  //   //     for(auto tuple : q_records[j]){
+  //   //       std::cout<<"Q value for agent: " << 0 << " at vertex: " << j << " is: " 
+  //   //             <<"action: " << std::get<1>(tuple) 
+  //   //             << " and value: " << std::get<2>(tuple)
+  //   //       << std::endl;
+  //   //     }
+  //   //     for(auto tuple : updated_q_records[j]){
+  //   //       std::cout<<"Q value for agent: " << 0 << " at vertex: " << j << " is: " 
+  //   //             <<"action: " << std::get<1>(tuple) 
+  //   //             << " and value: " << std::get<2>(tuple)
+  //   //       << std::endl;
+  //   //     };
+  //   //     Q_tables[i].print_Q_value_at_state(j);
+  //   //     bool a = 0;
+  //   //   }
+  //   // bool b = 0 ;
+  //   // }
+  // }
+  
+}
 
 void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
+  
+  build_dependence_graph(input_H_goal);
+  // learning_Q_value(input_H_goal,is_goal);
+
   // record_each_agent_frequency(input_H_goal);
   // // // return; 
   // if(is_goal){
@@ -407,7 +706,7 @@ void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
   // if(is_goal){
   //   PIBT_D.copy_global_data_and_clean_local();
   // }
-  increase_solution_congestion_cost(input_H_goal);
+  // increase_solution_congestion_cost(input_H_goal);
   // increase_solution_weight(input_H_goal);
 }
 
@@ -620,12 +919,12 @@ void Planner::pick_restart_nodes(std::stack<HNode*>& OPEN){
   std::uniform_int_distribution<size_t> dist(0, SOLUTION_NODES.size() - 1);
   size_t random_index = dist(*MT);
   OPEN = std::stack<HNode*>();
-  OPEN.push(SOLUTION_NODES[random_index]);
-  // for(auto n : SOLUTION_NODES){
-  //   if( n->parent == nullptr){
-  //     OPEN.push(n);
-  //   }
-  // }
+  // OPEN.push(SOLUTION_NODES[random_index]);
+  for(auto n : SOLUTION_NODES){
+    if( n->parent == nullptr){
+      OPEN.push(n);
+    }
+  }
   // bool a = 0 ;
 }
 
@@ -680,7 +979,13 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
     // low-level search end
     if (H->search_tree.empty()) {
       OPEN.pop();
+      std::cout<< "Popping the nodes" << std::endl;
       continue;
+    }
+
+    if (OPEN.size() == 1) {
+      // set_individual_congestion_map(H_init);
+      node_visit_times += 1; 
     }
 
     // check lower bounds
@@ -694,6 +999,7 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       if( H->f >= H_goal->f){
         increase_weight_map(H,false);
         pick_restart_nodes(OPEN);
+        std::cout<< "restarting search" << std::endl;
         continue;
       }
     }
@@ -701,9 +1007,11 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
     if(H_goal != nullptr  && H->f >= H_goal->f){
       increase_weight_map(H,false);
       pick_restart_nodes(OPEN);
+      std::cout<< "restarting search" << std::endl;
       continue;
     }
 
+    // std::cout<< "   asda   " << std::endl;
 
     // check goal condition
     if (H_goal == nullptr && is_same_config(H->C, ins->goals)) {
@@ -3837,6 +4145,82 @@ bool Planner::get_new_config(HNode* H, LNode* L)
   return true;
 }
 
+int Planner::get_action(Vertex* const& v_curr, Vertex* const& v_next, int width) {
+    int x1 = v_curr->index % width;
+    int y1 = v_curr->index / width;
+    int x2 = v_next->index % width;
+    int y2 = v_next->index / width;
+
+    if (x1 == x2 && y1 == y2) return 0;         // WAIT
+    if (x2 == x1 + 1 && y2 == y1) return 1;     // RIGHT
+    if (x2 == x1 - 1 && y2 == y1) return 2;     // LEFT
+    if (x2 == x1 && y2 == y1 + 1) return 3;     // DOWN
+    if (x2 == x1 && y2 == y1 - 1) return 4;     // UP
+}
+
+void  Planner::propogate_q_value_k_steps(int agent_id, Vertex* const& v_curr, Vertex* const& v_next, double cost_to_go, int k_steps)
+{ 
+  double alpha = 0.2;
+  if(k_steps <= 0){
+    // std::cout<<"Error: k_steps should be greater than 0"<<std::endl;
+    return;
+  }
+  // cost_to_go -> from v_curr to v_next;
+  // for (auto &&m : v_curr->neighbor) {
+  //   if( m->id == v_next->id) continue; // skip the next vertex
+  //   double cost =  cost_to_go + 2 ;
+  //   int action = get_action(v_curr, m, ins->G.width);
+  //   double q_table = Q_tables[agent_id](v_curr->id, action);
+  //   double delta = cost - Q_tables[agent_id](v_curr->id, action);
+  //   Q_tables[agent_id].update(v_curr->id, action, alpha, delta);
+  // }
+  int action = get_action(v_curr, v_next, ins->G.width);
+  // update the Q value for the action to v_next
+  double delta = cost_to_go - get_q_value(agent_id, v_curr, v_next);
+  Q_tables[agent_id].update(v_curr->index, action, alpha, delta);    
+
+  // update the Q value for the action WAIT
+  delta = cost_to_go + 1 - get_q_value(agent_id, v_curr, v_curr);
+  Q_tables[agent_id].update(v_curr->index, 0, alpha, delta);    
+
+  for (auto &&m : v_curr->neighbor) {
+    if( m->id == v_next->id) continue; // skip the next vertex
+    propogate_q_value_k_steps(agent_id, m, v_curr, cost_to_go + 1, k_steps - 1);
+  }
+}
+
+// void Planner::update_q_value(int agent_id, Vertex* const& v_curr, Vertex* const& v_next, double cost_to_go){
+//   int action = get_action(v_curr, v_next, ins->G.width);
+//   if(Q_tables[agent_id](v_curr->id,action) == -1){
+//     // not found, this cannot happened actually. 
+//     // std::cout<<"Error: Q_table not found for agent: "<< agent_id << " at vertex: "<< v_curr->index << " action: "<< action << std::endl;
+//     Q_tables[agent_id].set(v_curr->id, action, cost_to_go);
+//   }else{
+//     // found
+//     double q_table = Q_tables[agent_id](v_curr->id, action);
+//     double delta = cost_to_go - Q_tables[agent_id](v_curr->id, action);
+//     // if(delta < 0){
+//     //   std::cout<<"Error: Q_table update with negative delta: "<< delta << " for agent: "<< agent_id << " at vertex: "<< v_curr->index << " action: "<< action << std::endl;
+//     //   // delta = 0; // ignore negative delta
+//     // }
+//     double alpha = 0.4; // learning rate
+//     Q_tables[agent_id].update(v_curr->id, action, alpha, delta);
+//   }
+// }
+
+double Planner::get_q_value(int agent_id, Vertex* const& v_curr, Vertex* const& v_next){
+  int action = get_action( v_curr, v_next, ins->G.width);
+  if(Q_tables[agent_id](v_curr->index,action) == -1){
+    // not found
+    double q_value = PIBT_D.get_heuristic(agent_id, v_next);
+    Q_tables[agent_id].set(v_curr->index, action, q_value);
+    return q_value; 
+  }else{ 
+    return Q_tables[agent_id](v_curr->index,action);
+  }
+}
+
+
 bool Planner::funcPIBT(Agent* ai)
 {
   const auto i = ai->id;
@@ -3858,18 +4242,83 @@ bool Planner::funcPIBT(Agent* ai)
   //                    D.get(i, u) + tie_breakers[u->id];
   //           });
   // PIBT_D.compare_edge_map();
+  
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //           [&](Vertex* const v, Vertex* const u) {
+  //             // double b = D.get(i, u);
+  //             // double e = D.get(i, v); 
+  //             // double f = D.get(i, u);
+  //             // return (double)D.get(i, v) + tie_breakers[v->id] <
+  //             // (double) D.get(i, u) + tie_breakers[u->id];
+  //             return PIBT_D.get_heuristic(i, v) + tie_breakers[v->id] <
+  //             PIBT_D.get_heuristic(i, u) + tie_breakers[u->id];
+  //             // return PIBT_D.get_individual_heuristic(i, v) + tie_breakers[v->id] <
+  //             // PIBT_D.get_individual_heuristic(i, u) + tie_breakers[u->id];
+  //           });
+  // double selected_a = 10000; 
+  // double selected_b = 10000;
+  // Vertex* v_selected_a;
+  // Vertex* v_selected_b;
+  // for (auto k = 0; k < K + 1; ++k) {
+  //   auto v = C_next[i][k];
+  //   double a = get_q_value(i, ai->v_now,v);
+  //   double b = PIBT_D.get_heuristic(i, v); 
+  //   std::cout<< a << " " << b << std::endl;
+  //   if(a < selected_a){
+  //     selected_a = a;
+  //     v_selected_a = v;
+  //   }
+  //   if(b < selected_b){
+  //     selected_b = b;
+  //     v_selected_b = v;
+  //   }
+  // }
+  // if(v_selected_a != v_selected_b){
+  //   std::cout<<"Error: Q value not equal to PIBT heuristic: "<< selected_a << " != " << selected_b << std::endl;
+  //   std::cout<<"Agent: "<< i << " Vertex: "<< ai->v_now->id << " Next Vertex A: "<< v_selected_a->id << " Next Vertex B: "<< v_selected_b->id << std::endl;
+  // }
+
+
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //         [&](Vertex* const v, Vertex* const u) {
+  //           return get_q_value(i, ai->v_now,v) + tie_breakers[v->id] <
+  //           get_q_value(i, ai->v_now,u) + tie_breakers[u->id];
+  //         });
+
+  // double selected_a = 10000; 
+  // double selected_b = 10000;
+  // Vertex* v_selected_a;
+  // Vertex* v_selected_b;
+  // std::cout<< "Calculating heuritisic:              "<< std::endl;
+  // for (auto k = 0; k < K + 1; ++k) {
+  //   auto v = C_next[i][k];
+  //   double a = get_q_value(i, ai->v_now,v);
+  //   double b = PIBT_D.get_heuristic(i, v); 
+  //   std::cout<< "Q value:" << a << " PIBT heuristic: " << b << std::endl;
+  //   if(a < selected_a){
+  //     selected_a = a;
+  //     v_selected_a = v;
+  //   }
+  //   if(b < selected_b){
+  //     selected_b = b;
+  //     v_selected_b = v;
+  //   }
+  // }
+  // if(v_selected_a != v_selected_b){
+  //   std::cout<<"Error: Q value not equal to PIBT heuristic: "<< selected_a << " != " << selected_b << std::endl;
+  //   std::cout<<"Agent: "<< i << " Vertex: "<< ai->v_now->id << " Next Vertex A: "<< v_selected_a->id << " Next Vertex B: "<< v_selected_b->id << std::endl;
+  // }
+
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //         [&](Vertex* const v, Vertex* const u) {
+  //           return get_q_value(i, ai->v_now,v) + tie_breakers[v->id] <
+  //           get_q_value(i, ai->v_now,u) + tie_breakers[u->id];
+  //         });
+
   std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
             [&](Vertex* const v, Vertex* const u) {
-              // double a = D.get(i, v); 
-              // double b = D.get(i, u);
-              // double e = D.get(i, v); 
-              // double f = D.get(i, u);
-              // return (double)D.get(i, v) + tie_breakers[v->id] <
-              // (double) D.get(i, u) + tie_breakers[u->id];
-              return PIBT_D.get_heuristic(i, v) + tie_breakers[v->id] <
-              PIBT_D.get_heuristic(i, u) + tie_breakers[u->id];
-              // return PIBT_D.get_individual_heuristic(i, v) + tie_breakers[v->id] <
-              // PIBT_D.get_individual_heuristic(i, u) + tie_breakers[u->id];
+              return D.get(i, v) + tie_breakers[v->id] <
+              D.get(i, u) + tie_breakers[u->id];
             });
 
   Agent* swap_agent = swap_possible_and_required(ai);

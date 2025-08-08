@@ -5,6 +5,7 @@
 #include "utils.hpp"
 #include "heap.hpp"
 
+
 struct AstarDistTable {
   const uint V_size;  // number of vertices
   const uint W;
