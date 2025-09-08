@@ -12,6 +12,10 @@
  #include "min_max_stats.hpp"
  #include <unordered_set>
  #include "q_table.hpp"
+ #include "Astar_search.hpp"
+ #include "traffic_map.hpp"
+ #include "guidance_heuristic.hpp"
+
  // objective function
  enum Objective { OBJ_NONE, OBJ_MAKESPAN, OBJ_SUM_OF_LOSS };
  std::ostream& operator<<(std::ostream& os, const Objective objective);
@@ -208,7 +212,7 @@
         return std::hash<T1>()(pair.first) ^ (std::hash<T2>()(pair.second) << 1);
     }
   };
-
+  
  struct Planner {
    const Instance* ins;
    const Deadline* deadline;
@@ -225,6 +229,9 @@
    DistTable D;
    AstarDistTable PIBT_D;
 
+   TrafficMap traffic_map ; // Traffic map for A* search
+   ModifiedAstar astar_search; // A* search for traffic path finding
+   GuidanceHeuristic guidance_heuristic; // Guidance heuristic for pathfinding
    std::vector<QTable> Q_tables; // Q-tables for each agent
 
    uint loop_cnt;      // auxiliary
@@ -259,6 +266,9 @@
    std::vector<std::unordered_map<std::pair<int, int>, double, PairHash>> individual_transition_frequency;
    std::vector<HNode*> SOLUTION_NODES;
    
+   std::vector<std::vector<std::array<Vertex*, 5>>> action_history;
+
+
    bool reset_congestion_map = false;
    Planner(const Instance* _ins, const Deadline* _deadline, std::mt19937* _MT,
            const int _verbose = 0,
@@ -289,6 +299,8 @@
   uint multiple_simulations(int num_simulations, HNode*& H_goal, MCTNode* mcts_node, 
     std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED, std::vector<Config>& solution); 
   
+  void export_solution_from_HNode(HNode* goal, const std::string& filename);
+
   Solution MCT_lacam(std::string& additional_info);
   Solution MCT_vanilla_lacam(std::string& additional_info);
   Solution MCT_multiple_lacam(std::string& additional_info);
@@ -304,7 +316,12 @@
   std::vector<std::set<int>> transitiveClosureAll(const std::vector<std::set<int>>& graph);
 
   std::vector<int> depth_cluster(const std::vector<std::set<int>>& graph, int start, int input_depth, std::vector<bool>& visited);
+  
+  void bfs_ordering(int node, const std::vector<std::set<int>>& graph, std::vector<bool>& visited, std::vector<int>& result);
+  void export_revised_path(const std::vector<std::vector<uint>>& revised_path, const std::string& filename);
+
   void build_dependence_graph(HNode* input_H_goal);
+  void increase_traffic_based_on_solution(HNode* input_H_goal);
   void backpropagate_order(HNode* H_goal);
   void decay_punishment();
 
@@ -333,6 +350,8 @@
   void add_punishment(HNode* input_H_goal, std::unordered_map<Config, HNode*, ConfigHasher>& EXPLORED); 
   void pick_restart_nodes(std::stack<HNode*>& OPEN);
 
+  void optimize_traffic_based_on_order(std::vector<int>& dfs_order, 
+    std::vector<std::vector<uint>>& solution_nodes);
 
 
   void rewrite_backpropagate(HNode* H_from, HNode* H_to, HNode* H_goal,
@@ -369,7 +388,8 @@
   void learning_Q_value(HNode* input_H_goal,double is_goal);
   void set_individual_congestion_map(HNode* H_init);
 
-  
+  void optimize_traffic_based_on_order(std::vector<uint> ranking, 
+std::vector<std::vector<uint>>& solution, std::vector<std::set<int>>& interacted_agents);
 
 
   // swap operation

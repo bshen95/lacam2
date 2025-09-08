@@ -29,6 +29,7 @@ void AstarDistTable::setup(const Instance* ins)
     for (size_t j = 0; j < V_size; ++j) {
       V_Node_table[i][j].expanded = false;
       V_Node_table[i][j].in_queue = false;
+      V_Node_table[i][j].generated = false;
       V_Node_table[i][j].v= ins->G.V[j];
     }
     auto n = ins->goals[i];
@@ -37,6 +38,7 @@ void AstarDistTable::setup(const Instance* ins)
     V_Node_table[i][n->id].h = manhattan_dist(n,starts[i]);
     V_Node_table[i][n->id].update_f();
     V_Node_table[i][n->id].in_queue = true;
+    V_Node_table[i][n->id].generated = true;
   }
 
   if (edge_map) delete edge_map;
@@ -59,14 +61,14 @@ void AstarDistTable::reset(const Instance* ins)
     OPEN[i].clear();
     for (size_t j = 0; j < V_size; ++j) {
       V_Node_table[i][j].expanded = false;
-      V_Node_table[i][j].in_queue = false;
+      V_Node_table[i][j].generated = false;
     }
     auto n = ins->goals[i];
     OPEN[i].push(&V_Node_table[i][n->id]);
     V_Node_table[i][n->id].g = 0;
     V_Node_table[i][n->id].h = manhattan_dist(n,starts[i]);
     V_Node_table[i][n->id].update_f();
-    V_Node_table[i][n->id].in_queue = true;
+    V_Node_table[i][n->id].generated = true;
   }
 }
 
@@ -134,6 +136,7 @@ double AstarDistTable::get_individual_heuristic(uint i, uint v_id)
     V_Node* n = OPEN[i].pop();
     const double d_n = n->g;
     V_Node_table[i][n->v->id].expanded = true;
+    V_Node_table[i][n->v->id].in_queue = false;
     for (auto &&m : n->v->neighbor) {
       double g = d_n + get_edge_weight(i,n->v->index, m->index);
       double h = manhattan_dist(m, starts[i]);
@@ -218,12 +221,12 @@ double AstarDistTable::get_heuristic(uint i, uint v_id)
     for (auto &&m : n->v->neighbor) {
       double g = d_n + get_edge_weight(n->v->index, m->index);
       double h = manhattan_dist(m, starts[i]);
-      if (!V_Node_table[i][m->id].in_queue) {
+      if (!V_Node_table[i][m->id].generated) {
         V_Node_table[i][m->id].g = g ;
         V_Node_table[i][m->id].h = h;
         V_Node_table[i][m->id].f = g + h;
         V_Node_table[i][m->id].predecessor = n->v->id;
-        V_Node_table[i][m->id].in_queue = true;
+        V_Node_table[i][m->id].generated = true;
         OPEN[i].push(&V_Node_table[i][m->id]);
       }else{
         if (g + h < V_Node_table[i][m->id].f){

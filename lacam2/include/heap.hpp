@@ -20,7 +20,9 @@ struct V_Node{
     double g = 0;
     double h = 0;
     double f = 0;
+    double tie_breaker = 0; // tie breaker for equal f values
     bool expanded = false;
+    bool generated = false;
     bool in_queue = false;
     uint predecessor = 0;
     Vertex* v = nullptr;
@@ -29,7 +31,7 @@ struct V_Node{
     v(_v) {}
     V_Node() = default;
 
-
+    // this is used for indexing in the priority queue
     unsigned int get_priority() const { return priority; }
     void set_priority(unsigned int p) { priority = p; }
 
@@ -39,6 +41,10 @@ struct V_Node{
 
     double get_f() const {
         return f;
+    }
+
+    double get_tie_breaker() const {
+        return tie_breaker;
     }
 
     void update_f(){
@@ -55,6 +61,22 @@ struct cmp_less_f
                     return rand() % 2;
                 else
                     return lhs.get_g() > rhs.get_g();
+        }
+        else
+            return lhs.get_f() < rhs.get_f();
+
+    }
+};
+
+struct cmp_less_f_tie_breaker
+{
+    inline bool operator()(const V_Node& lhs, const V_Node& rhs) const
+    {
+        if (lhs.get_f() == rhs.get_f()){
+                if (lhs.get_tie_breaker() == rhs.get_tie_breaker())
+                    return rand() % 2;
+                else
+                    return lhs.get_tie_breaker() > rhs.get_tie_breaker();
         }
         else
             return lhs.get_f() < rhs.get_f();
@@ -312,6 +334,6 @@ class pqueue
 };
 
 typedef pqueue<V_Node, cmp_less_f, min_q> pqueue_min_f;
-
+typedef pqueue<V_Node, cmp_less_f_tie_breaker, min_q> pqueue_min_f_tie_breaker;
 
 #endif

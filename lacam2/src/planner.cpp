@@ -98,6 +98,9 @@ Planner::Planner(const Instance* _ins, const Deadline* _deadline,
       V_size(ins->G.size()),
       D(DistTable(ins)),
       PIBT_D(AstarDistTable(ins)),
+      traffic_map(&ins->G),
+      astar_search(&traffic_map, &ins->G),
+      guidance_heuristic( &ins->G, &traffic_map, N),
       Q_tables(N, QTable(ins->G.U.size(), 5, -1)),
       loop_cnt(0),
       C_next(N),
@@ -134,19 +137,22 @@ void Planner::propagate_order_to_neighbors(HNode* current_node) {
 }
 
 void Planner::build_dependence_graph(HNode* input_H_goal) {
+  if(input_H_goal->h != 0){
+    return;
+  }
   std::vector<double> agent_cost(N, 0);
   std::vector<double> agent_ratio(N, 0);
   HNode* current = input_H_goal;
-  std::vector<std::vector<int>> solution_nodes = std::vector<std::vector<int>>(N);
+  std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
   for (uint i = 0; i < N; ++i) {
-    solution_nodes[i].push_back(ins->goals[i]->index);
+    solution_nodes[i].push_back(input_H_goal->C[i]->index);
   }
 
   while (current->parent != nullptr) {
     get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
     for(uint i = 0; i < N; ++i) {
       if(solution_nodes[i].size() == 1 
-      && current->C[i]->index == ins->goals[i]->index){
+      && current->C[i]->index == input_H_goal->C[i]->index){
         continue; // skip if already at goal
       }
       solution_nodes[i].push_back(current->C[i]->index);
@@ -182,56 +188,133 @@ void Planner::build_dependence_graph(HNode* input_H_goal) {
       Vertex* from_v = ins->G.U[solution_nodes[agent_id][j]];
       Vertex* to_v = ins->G.U[solution_nodes[agent_id][j + 1]];
       int current_time_step = j; // Assuming j starts from 0, so +1 for time step
-      const auto K = from_v->neighbor.size();
 
-      // get candidates for next locations
-      for (auto k = 0; k < K; ++k) {
-        auto u = from_v->neighbor[k];
-        C_next[agent_id][k] = u;
-        if (MT != nullptr)
-          tie_breakers[u->id] = get_random_float(MT); // set tie-breaker 
-      }
-      C_next[agent_id][K] = from_v;
-
-      std::sort(C_next[agent_id].begin(), C_next[agent_id].begin() + K + 1,
-          [&](Vertex* const v, Vertex* const u) {
-            return D.get(agent_id, v) + tie_breakers[v->id] <
-            D.get(agent_id, u) + tie_breakers[u->id];
-          });
-      
-      // update edge weights
-      int occupied_vertex =  0 ; 
-      for (size_t k = 0; k < K + 1; ++k) {
-        if (C_next[agent_id][k]->index == to_v->index) {
-          occupied_vertex = k;
-          break;
-        }
-      }
-      if( occupied_vertex != 0){
-        // check which adgent occupied the vertex! 
-        for( int i = 0; i < occupied_vertex; i++){
-          int v_index = C_next[agent_id][i]->index;
-          auto edge = std::make_pair(C_next[agent_id][i]->index, current_time_step + 1);
-          if(occupancy_map.find(edge) != occupancy_map.end()){
-            if(occupancy_map[edge] != agent_id){
-              interacted_agents[agent_id].insert(occupancy_map[edge]);
-            }
+      // TODO::Due to swap option, sometimes there could be no cached operation. 
+      // TODO:: Skip this case for now. 
+      if(action_history[agent_id][from_v->index][0] == nullptr) continue;
+      for(auto vertex : action_history[agent_id][from_v->index] ){
+        if(vertex->index == to_v->index) break; // skip if already at the next vertex
+        auto edge = std::make_pair(vertex->index, current_time_step + 1);
+        if(occupancy_map.find(edge) != occupancy_map.end()){
+          if(occupancy_map[edge] != agent_id){
+            interacted_agents[agent_id].insert(occupancy_map[edge]);
           }
         }
       }
     }
   }
-  transitiveClosureAll(interacted_agents);
-  std::vector<bool> visited(N, false);
-  std::vector<std::vector<int>> depth_clustered_agents;
-  for(auto rank : ranking){
-    if(visited[rank]) continue; // skip if already visited
-    depth_clustered_agents.push_back(depth_cluster(interacted_agents, rank, 1, visited));
-  }
-  export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
-  export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
-  bool a = 0;
+  // std::vector<bool> visited(N, false);
+  // std::vector<std::vector<int>> depth_clustered_agents;
+  // for(auto rank : ranking){
+  //   if(visited[rank]) continue; // skip if already visited
+  //   depth_clustered_agents.push_back(depth_cluster(interacted_agents, rank, 1, visited));
+  // }
+  // export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
+  // export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
+  // std::vector<bool> visited(N, false);
+  // std::vector<int> bfs_order = {};
+  // for(auto rank : ranking){
+  //   if(visited[rank]) continue;
+  //   bfs_ordering(rank, interacted_agents, visited, bfs_order);
+  // }
+  // optimize_traffic_based_on_order(bfs_order, solution_nodes);
+  optimize_traffic_based_on_order(ranking, solution_nodes, interacted_agents);
 }
+
+
+void Planner::bfs_ordering(int node, const std::vector<std::set<int>>& graph, std::vector<bool>& visited, std::vector<int>& result) {
+  std::queue<int> q;
+  q.push(node);
+  while (!q.empty()) {
+      int next_node = q.front(); q.pop();
+      if(!visited[next_node] ){
+        visited[next_node] = true;
+        result.push_back(next_node);
+        for (int neighbor : graph[next_node]) {
+          q.push(neighbor);
+        }
+      }
+  }
+}
+
+void Planner::optimize_traffic_based_on_order(std::vector<uint> ranking, 
+std::vector<std::vector<uint>>& solution, std::vector<std::set<int>>& interacted_agents){
+
+  std::cout<< "Optimizing traffic based on BFS order..." << std::endl;
+  traffic_map.reset();
+  traffic_map.initialize_traffic_map(solution);
+  // traffic_map.export_traffic_map_csv("old_traffic_map.csv");
+  std::vector<std::vector<uint>> revised_path = solution;
+  int times = 1000; 
+  while (times > 0 ){
+    std::vector<bool> visited(N, false);
+    std::vector<int> bfs_order = {};
+    for(auto rank : ranking){
+      if(visited[rank]) continue;
+      bfs_ordering(rank, interacted_agents, visited, bfs_order);
+    }
+    for (size_t i = 0; i < bfs_order.size(); ++i) {
+      int agent_id = bfs_order[i];
+      traffic_map.remove_path(revised_path[agent_id]);
+      auto path = astar_search.compute_traffic_path_index(ins->starts[agent_id]->index, ins->goals[agent_id]->index);
+      if (path.empty()) {
+        std::cout << "No path found for agent " << agent_id << std::endl;
+        continue; // No path found, skip this agent
+      }
+      traffic_map.add_path(path);
+      revised_path[agent_id] = path;
+      // update the edge weights in the traffic map
+    } 
+    std::shuffle(ranking.begin(), ranking.end(), *MT);
+    times --;
+  } 
+  guidance_heuristic.set_gudiance_path(revised_path);
+}
+
+void Planner::optimize_traffic_based_on_order(std::vector<int>& bfs_order, 
+  std::vector<std::vector<uint>>& solution ) {
+  // This function optimizes the traffic map based on the current order of agents.
+  // It updates the edge weights in the traffic map according to the current order.
+  std::cout<< "Optimizing traffic based on BFS order..." << std::endl;
+  traffic_map.reset();
+  traffic_map.initialize_traffic_map(solution);
+  // traffic_map.export_traffic_map_csv("old_traffic_map.csv");
+  std::vector<std::vector<uint>> revised_path = solution;
+  int times = 1000; 
+  while (times > 0 ){
+    for (size_t i = 0; i < bfs_order.size(); ++i) {
+      int agent_id = bfs_order[i];
+      traffic_map.remove_path(revised_path[agent_id]);
+      auto path = astar_search.compute_traffic_path_index(ins->starts[agent_id]->index, ins->goals[agent_id]->index);
+      if (path.empty()) {
+        std::cout << "No path found for agent " << agent_id << std::endl;
+        continue; // No path found, skip this agent
+      }
+      traffic_map.add_path(path);
+      revised_path[agent_id] = path;
+      // update the edge weights in the traffic map
+    } 
+    std::shuffle(bfs_order.begin(), bfs_order.end(), *MT);
+    times --;
+  } 
+  // traffic_map.reset();
+  // traffic_map.initialize_traffic_map(revised_path);
+  guidance_heuristic.set_gudiance_path(revised_path);
+  // export_revised_path(revised_path, "revised_path_3.csv");
+  // traffic_map.export_traffic_map_csv("revised_traffic_map4.csv");
+}
+
+void Planner::export_revised_path(const std::vector<std::vector<uint>>& revised_path, const std::string& filename) {
+    std::ofstream fout(filename);
+    fout << "agent_id,time_step,vertex_index\n";
+    for (size_t agent = 0; agent < revised_path.size(); ++agent) {
+        for (size_t t = 0; t < revised_path[agent].size(); ++t) {
+            fout << agent << "," << t << "," << revised_path[agent][t] << "\n";
+        }
+    }
+    fout.close();
+}
+
 
 std::vector<int> Planner::depth_cluster(const std::vector<std::set<int>>& graph, int start, int input_depth, std::vector<bool>& visited) {
     std::vector<int> cluster;
@@ -322,72 +405,80 @@ void Planner::export_interacted_agents_graph(const std::vector<std::set<int>>& i
 }
 
 void Planner::backpropagate_order(HNode* input_H_goal) {
-  // return;
-  order_updated_times ++;
-  std::vector<double> agent_cost(N, 0);
-  std::vector<double> agent_ratio(N, 0);
-  HNode* current = input_H_goal;
-  current->order_updated = order_updated_times;
-
-  // while (current->parent != nullptr) {
-  //   current->order_updated = order_updated_times;
-  //   current = current->parent;
-  // }
-
-  current = input_H_goal;
+  HNode* current  = input_H_goal;
+  SOLUTION_NODES = std::vector<HNode*>();
   while (current->parent != nullptr) {
-    get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
-    SOLUTION_NODES = std::vector<HNode*>();
-    SOLUTION_NODES.push_back(current);
-
-    for (uint i = 0; i < N; ++i) {
-      if( D.get(i,current->parent->C[i]) == 0){
-        // a large number 
-        agent_ratio[i] = 10000;
-      }else{
-        agent_ratio[i] = agent_cost[i] / (D.get(i, current->parent->C[i]) -
-                                          D.get(i, input_H_goal->C[i]));
-      }
-    }
-
-    // std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
-    // for (size_t i = 0; i < agent_ratio.size(); ++i) {
-    //     agent_ratio[i] = agent_ratio[i] * (1 + noise_dist(*MT));
-    // }
-    std::sort(current->parent->order.begin(),current->parent->order.end(), [&](uint i, uint j) {
-        return (agent_ratio[i] ) < (agent_ratio[j]);
-    });
-
-    // for(auto o :current->parent->order){
-    //   std::cout<< o << " ";
-    // }
-    // std::cout<< std::endl;
-
-    // fix order for partent: 
-    current->parent->set_priority_and_order(current->parent->order);
-    current->parent->reordering(N,D);
-    while (!current->parent->search_tree.empty()) {
-      delete current->parent->search_tree.front();
-      current->parent->search_tree.pop();
-    }
-    current->parent->search_tree.push(new LNode());
-    current->parent->order_updated = order_updated_times;
-    // TODO: propagate the order to neighbourhood. 
-    propagate_order_to_neighbors(current->parent);
-
-    // if(makespan > start && makespan < end){
-      // update the edge weights
-      // for(int i = 0; i < N; ++i){
-      //   if(current->parent->C[i]->index != current->C[i]->index){
-      //     PIBT_D.increase_edge_weight(current->parent->C[i]->index, current->C[i]->index, 1);
-      //   }
-      // }
-    // }
-
     current = current->parent;
-    // makespan --;
   }
   SOLUTION_NODES.push_back(current);
+  return;
+  // return;
+  // order_updated_times ++;
+  // // return;
+  // std::vector<double> agent_cost(N, 0);
+  // std::vector<double> agent_ratio(N, 0);
+  // HNode* current = input_H_goal;
+  // current->order_updated = order_updated_times;
+
+  // // while (current->parent != nullptr) {
+  // //   current->order_updated = order_updated_times;
+  // //   current = current->parent;
+  // // }
+
+  // current = input_H_goal;
+  // while (current->parent != nullptr) {
+  //   get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
+  //   SOLUTION_NODES = std::vector<HNode*>();
+  //   SOLUTION_NODES.push_back(current);
+
+  //   for (uint i = 0; i < N; ++i) {
+  //     if( D.get(i,current->parent->C[i]) == 0){
+  //       // a large number 
+  //       agent_ratio[i] = 10000;
+  //     }else{
+  //       agent_ratio[i] = agent_cost[i] / (D.get(i, current->parent->C[i]) -
+  //                                         D.get(i, input_H_goal->C[i]));
+  //     }
+  //   }
+
+  //   // std::uniform_real_distribution<double> noise_dist(-0.1, 0.1); // Adjust range as needed
+  //   // for (size_t i = 0; i < agent_ratio.size(); ++i) {
+  //   //     agent_ratio[i] = agent_ratio[i] * (1 + noise_dist(*MT));
+  //   // }
+  //   std::sort(current->parent->order.begin(),current->parent->order.end(), [&](uint i, uint j) {
+  //       return (agent_ratio[i] ) < (agent_ratio[j]);
+  //   });
+
+  //   // for(auto o :current->parent->order){
+  //   //   std::cout<< o << " ";
+  //   // }
+  //   // std::cout<< std::endl;
+
+  //   // fix order for partent: 
+  //   current->parent->set_priority_and_order(current->parent->order);
+  //   current->parent->reordering(N,D);
+  //   while (!current->parent->search_tree.empty()) {
+  //     delete current->parent->search_tree.front();
+  //     current->parent->search_tree.pop();
+  //   }
+  //   current->parent->search_tree.push(new LNode());
+  //   current->parent->order_updated = order_updated_times;
+  //   // TODO: propagate the order to neighbourhood. 
+  //   propagate_order_to_neighbors(current->parent);
+
+  //   // if(makespan > start && makespan < end){
+  //     // update the edge weights
+  //     // for(int i = 0; i < N; ++i){
+  //     //   if(current->parent->C[i]->index != current->C[i]->index){
+  //     //     PIBT_D.increase_edge_weight(current->parent->C[i]->index, current->C[i]->index, 1);
+  //     //   }
+  //     // }
+  //   // }
+
+  //   current = current->parent;
+  //   // makespan --;
+  // }
+  // SOLUTION_NODES.push_back(current);
   // PIBT_D.reset(ins);
 }
 
@@ -688,10 +779,45 @@ void Planner::learning_Q_value(HNode* input_H_goal, double is_goal){
   // }
   
 }
+void Planner::increase_traffic_based_on_solution(HNode* input_H_goal) {
+    guidance_heuristic.initialized = true;
+    // traffic_map.reset();
+    HNode* current = input_H_goal;
+    std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
+    for (uint i = 0; i < N; ++i) {
+      solution_nodes[i].push_back(input_H_goal->C[i]->index);
+    }
+    while (current->parent != nullptr) {
+      for(uint i = 0; i < N; ++i) {
+        if(solution_nodes[i].size() == 1 
+        && current->C[i]->index == input_H_goal->C[i]->index){
+          continue; // skip if already at goal
+        }
+        solution_nodes[i].push_back(current->C[i]->index);
+      }
+      current = current->parent;
+    }
+
+    for (uint i = 0; i < N; ++i) {
+      solution_nodes[i].push_back(ins->starts[i]->index);
+      std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
+    }
+    for(auto solution : solution_nodes){
+      // traffic_map.add_incremental_flow_path(solution); 
+      traffic_map.add_path(solution);
+    }
+    // traffic_map.record_incremental_flow();
+    // traffic_map.print_incremental_flow("incremental_flow.csv");
+    guidance_heuristic.reset(ins);
+    // std::cout<<"finishing increasing traffic map" << std::endl;
+}
 
 void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
   
-  build_dependence_graph(input_H_goal);
+  // build_dependence_graph(input_H_goal);
+    increase_traffic_based_on_solution(input_H_goal);
+
+  
   // learning_Q_value(input_H_goal,is_goal);
 
   // record_each_agent_frequency(input_H_goal);
@@ -699,9 +825,9 @@ void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
   // if(is_goal){
   // //   increase_each_agent_cost(input_H_goal);
   // //   // increase_solution_weight(input_H_goal);
-  //   increase_solution_congestion_cost(input_H_goal);
+    // increase_solution_congestion_cost(input_H_goal);
   // }
-  
+    // std::cout<<"Finished increasing weight map" << std::endl;
   // std::cout<<"Function called" << std::endl;
   // if(is_goal){
   //   PIBT_D.copy_global_data_and_clean_local();
@@ -730,7 +856,7 @@ void Planner::increase_each_agent_cost(HNode* input_H_goal) {
         // skip if stay at goal; 
         continue;
       }
-      if(  learned_travel_cost[i].back().first == current->parent->C[i]->index){
+      if( learned_travel_cost[i].back().first == current->parent->C[i]->index){
         // skip if stay at goal; 
         learned_travel_cost[i].back().second += 1;  
       }else{
@@ -829,6 +955,19 @@ void Planner::increase_solution_congestion_cost(HNode* input_H_goal) {
     PIBT_D.increase_edge_weight(p.first.first, p.first.second, 
       increased_weight);
   }
+
+  for(auto& p : contra_flow){
+    auto traffic = traffic_map.get_incremental_traffic_cost(p.first.first, p.first.second);
+    auto pibt_traffic = PIBT_D.get_edge_weight(p.first.first, p.first.second);
+    if(traffic != pibt_traffic){
+      std::cout<<"Edge: " << p.first.first << " " << p.first.second << std::endl;
+      std::cout<<"Mismatch traffic: " << traffic << " vs " << pibt_traffic << std::endl;
+    }
+    // PIBT_D.increase_edge_weight(p.first.first, p.first.second, increased_weight);
+    // PIBT_D.increase_edge_weight(p.first.first, p.first.second, 
+      // increased_weight);
+  }
+
   // PIBT_D.reset(ins);
   // for( int i = 0; i < N; i++){
   //   PIBT_D.test_dijkstra(i,ins);
@@ -925,11 +1064,32 @@ void Planner::pick_restart_nodes(std::stack<HNode*>& OPEN){
       OPEN.push(n);
     }
   }
+  // std::cout<< "Restarting search with " << OPEN.size() << " nodes" << std::endl;
   // bool a = 0 ;
 }
 
 
 
+void Planner::export_solution_from_HNode(HNode* goal, const std::string& filename) {
+    // Backtrack from goal to root, collecting configurations
+    std::vector<Config> solution;
+    HNode* current = goal;
+    while (current != nullptr) {
+        solution.push_back(current->C);
+        current = current->parent;
+    }
+    std::reverse(solution.begin(), solution.end());
+
+    // Export as CSV: agent_id, time_step, vertex_index
+    std::ofstream fout(filename);
+    fout << "agent_id,time_step,vertex_index\n";
+    for (size_t t = 0; t < solution.size(); ++t) {
+        for (size_t agent = 0; agent < solution[t].size(); ++agent) {
+            fout << agent << "," << t << "," << solution[t][agent]->index << "\n";
+        }
+    }
+    fout.close();
+}
 
 Solution Planner::backpropagate_solve(std::string& additional_info)
 {
@@ -938,6 +1098,14 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
   uint node_id = 1;
   // setup agents
   for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
+  // use action history to record the actions taken by each agent
+  action_history = std::vector<std::vector<std::array<Vertex*, 5>>>(
+      N, std::vector<std::array<Vertex*, 5>>(
+          ins->G.U.size(), std::array<Vertex*, 5>{}
+      )
+  );
+
+  guidance_heuristic.setup(ins);
 
   // setup search
   auto OPEN = std::stack<HNode*>();
@@ -994,20 +1162,36 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
     //   continue;
     // }
 
-
-    if (H_goal != nullptr && is_same_config(H->C, ins->goals)) {
-      if( H->f >= H_goal->f){
-        increase_weight_map(H,false);
-        pick_restart_nodes(OPEN);
-        std::cout<< "restarting search" << std::endl;
-        continue;
-      }
+    if(verbose == 3){
+      std::cout<< " - type: expanding" <<std::endl;
+      std::cout<< "   id: "<< H->node_id <<std::endl;
+      std::cout<< "   pId: " 
+            << (H->parent == nullptr ? "0" : std::to_string(H->parent->node_id)) <<std::endl;
+      std::cout<< "   f_value: "<< H->f<<std::endl;
     }
 
+    // if (H_goal != nullptr && is_same_config(H->C, ins->goals)) {
+    //   // if( H->f >= H_goal->f){
+    //   //   increase_weight_map(H,false);
+    //   //   pick_restart_nodes(OPEN);
+    //   //   // std::cout<< "restarting search" << std::endl;
+    //   //   continue;
+    //   // }
+    //   backpropagate_order(H);
+    //   increase_weight_map(H,true);
+    //   pick_restart_nodes(OPEN);
+    //   // solver_info(1, "main search found solution, cost: ", H->g);
+    //   // export_solution_from_HNode(H, "solution_0.csv");
+    //   continue;
+    // }
+
     if(H_goal != nullptr  && H->f >= H_goal->f){
-      increase_weight_map(H,false);
+      // export_solution_from_HNode(H, "solution_" + std::to_string(restart_cnt) + ".csv");
+      restart_cnt++;
+      backpropagate_order(H);
+      increase_weight_map(H,true);
       pick_restart_nodes(OPEN);
-      std::cout<< "restarting search" << std::endl;
+      // std::cout<< "restarting search" << std::endl;
       continue;
     }
 
@@ -1021,17 +1205,12 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       backpropagate_order(H_goal);
       increase_weight_map(H_goal,true);
       pick_restart_nodes(OPEN);
+      // export_solution_from_HNode(H, "current_solution.csv");
       continue;
     }
 
     
-    if(verbose == 3){
-      std::cout<< " - type: expanding" <<std::endl;
-      std::cout<< "   id: "<< H->node_id <<std::endl;
-      std::cout<< "   pId: " 
-            << (H->parent == nullptr ? "0" : std::to_string(H->parent->node_id)) <<std::endl;
-      std::cout<< "   f_value: "<< H->f<<std::endl;
-    }
+
     // create successors at the low-level search
     auto L = H->search_tree.front();
     H->search_tree.pop();
@@ -1051,6 +1230,7 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
     if (iter != EXPLORED.end()) {
       // case found
       // rewrite(H, iter->second, H_goal, OPEN);
+      
       rewrite_backpropagate(H, iter->second, H_goal, OPEN, H_init,EXPLORED);
       if(OPEN.size() == 1 ){
         continue;
@@ -1059,6 +1239,8 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       auto H_insert = (MT != nullptr && get_random_float(MT) >= RESTART_RATE)
                           ? iter->second
                           : H_init;
+
+      
       // if(H_insert == H_init){
       //   backpropagate_order(H_insert);
       // }
@@ -1307,6 +1489,8 @@ void Planner::MCT_backpropagate(MCTNode* mct_node, int sample_times,  double rew
     MCT_backpropagate(mct_node->parent, sample_times, reward, failuare_times);
   }
 }
+
+
 
 
 MCTNode* Planner::MCT_selection(std::vector<MCTNode*>& node_pool, HNode* goal_node){
@@ -3770,7 +3954,6 @@ void Planner::rewrite_backpropagate(HNode* H_from, HNode* H_to, HNode* H_goal,
 {
   // update neighbors
   H_from->neighbor.insert(H_to);
-
   // Dijkstra update
   std::queue<HNode*> Q({H_from});  // queue is sufficient
   while (!Q.empty()) {
@@ -4315,11 +4498,38 @@ bool Planner::funcPIBT(Agent* ai)
   //           get_q_value(i, ai->v_now,u) + tie_breakers[u->id];
   //         });
 
-  std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //         [&](Vertex* const v, Vertex* const u) {
+  //           return PIBT_D.get_heuristic(i, v) + tie_breakers[v->id] <
+  //           PIBT_D.get_heuristic(i, u) + tie_breakers[u->id];
+  //         });
+
+
+  if(!guidance_heuristic.initialized){
+    std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+              [&](Vertex* const v, Vertex* const u) {
+                return D.get(i, v) + tie_breakers[v->id] <
+                D.get(i, u) + tie_breakers[u->id];
+              });
+  }else{
+      std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
             [&](Vertex* const v, Vertex* const u) {
-              return D.get(i, v) + tie_breakers[v->id] <
-              D.get(i, u) + tie_breakers[u->id];
+              return guidance_heuristic.get_Astar_heuristic(i, v->id) + tie_breakers[v->id] <
+              guidance_heuristic.get_Astar_heuristic(i, u->id) + tie_breakers[u->id];
             });
+  }
+
+  // if(!guidance_heuristic.initialized){
+  //   // update the guidance heuristic
+
+  // }
+  // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+  //         [&](Vertex* const v, Vertex* const u) {
+  //           return D.get(i, v) + tie_breakers[v->id] <
+  //           D.get(i, u) + tie_breakers[u->id];
+  //         });
+  action_history[ai->id][ai->v_now->index] = C_next[i];  // record the action order;
+  
 
   Agent* swap_agent = swap_possible_and_required(ai);
   if (swap_agent != nullptr)
