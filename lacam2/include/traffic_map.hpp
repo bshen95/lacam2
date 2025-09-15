@@ -20,7 +20,7 @@ struct TrafficMap {
     std::vector<int> edge_flow;
     const Graph* G = nullptr;
     // traffic map takes vertex->index as input !
-    std::vector<int> incremental_flow;
+    std::vector<double> incremental_flow;
     std::vector<bool> visited;
 
 
@@ -88,14 +88,14 @@ struct TrafficMap {
     //   }
     // }
 
-    int get_incremental_traffic_cost(uint a, uint b) const {
+    double get_incremental_traffic_cost(uint a, uint b) const {
       if(a == b) return 0;
       int edge_idx = edge_index(a, b);
       return incremental_flow[edge_idx];
     }
 
 
-    std::tuple<int,int> get_traffic_cost(uint a, uint b) const {
+    std::tuple<double,double> get_traffic_cost(uint a, uint b) const {
       if(a == b) return {0, 0};
       // if(a == b) return {0, 0}; // No cost if the same vertex
       int edge_idx = edge_index(a, b);
@@ -148,7 +148,29 @@ struct TrafficMap {
       }
     }
 
+    void add_incremental_flow_path_from_time_index(const std::vector<uint>& path, uint start_time_index) {
+      if( path.size() <= start_time_index){
+        return;
+      }
+      // remove path from traffic map
+      for (size_t i = start_time_index; i < path.size() - 1; ++i) {
+        visited[path[i]] = true;
+        visited[path[i+1]] = true;
+        uint a = path[i];
+        uint b = path[i + 1];
+        vertex_flow[b] ++;
+        if(a == b) continue; // Skip if the same vertex
+        int e_index = edge_index(a, b);
+        edge_flow[e_index] ++; 
+      }
+    }
+
+
     void record_incremental_flow(){
+      // for (size_t i = 0; i < incremental_flow.size(); ++i) {
+      //   incremental_flow[i] = incremental_flow[i] * 0.8; // reset to 1
+      // }
+
       std::unordered_set<std::pair<int,int>, EdgePairHash> visited_edge;
       for(size_t i = 0; i < visited.size(); ++i) {
         if(visited[i]) {
@@ -162,7 +184,8 @@ struct TrafficMap {
         if( edge.first == edge.second) continue;
         int edge_idx = edge_index(edge.first, edge.second);
         auto [t1, t2] = get_traffic_cost(edge.first, edge.second);
-        incremental_flow[edge_idx] += (t1 + t2);
+        incremental_flow[edge_idx] += 0.6*(t1 + t2);
+        // incremental_flow[edge_idx] += (t1 + t2);
       }
     }
 

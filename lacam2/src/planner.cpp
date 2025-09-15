@@ -99,6 +99,7 @@ Planner::Planner(const Instance* _ins, const Deadline* _deadline,
       D(DistTable(ins)),
       PIBT_D(AstarDistTable(ins)),
       traffic_map(&ins->G),
+      time_period_traffic_map(time_bucket_size, TrafficMap(&ins->G) ), // Initialize time-period based
       astar_search(&traffic_map, &ins->G),
       guidance_heuristic( &ins->G, &traffic_map, N),
       Q_tables(N, QTable(ins->G.U.size(), 5, -1)),
@@ -111,6 +112,7 @@ Planner::Planner(const Instance* _ins, const Deadline* _deadline,
       tree_file(save_tree_file),
       individual_transition_frequency(N)
 {
+
 }
 
 Planner::~Planner() {}
@@ -211,14 +213,14 @@ void Planner::build_dependence_graph(HNode* input_H_goal) {
   // }
   // export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
   // export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
-  // std::vector<bool> visited(N, false);
-  // std::vector<int> bfs_order = {};
-  // for(auto rank : ranking){
-  //   if(visited[rank]) continue;
-  //   bfs_ordering(rank, interacted_agents, visited, bfs_order);
-  // }
-  // optimize_traffic_based_on_order(bfs_order, solution_nodes);
-  optimize_traffic_based_on_order(ranking, solution_nodes, interacted_agents);
+  std::vector<bool> visited(N, false);
+  std::vector<int> bfs_order = {};
+  for(auto rank : ranking){
+    if(visited[rank]) continue;
+    bfs_ordering(rank, interacted_agents, visited, bfs_order);
+  }
+  optimize_traffic_based_on_order(bfs_order, solution_nodes);
+  // optimize_traffic_based_on_order(ranking, solution_nodes, interacted_agents);
 }
 
 
@@ -239,13 +241,12 @@ void Planner::bfs_ordering(int node, const std::vector<std::set<int>>& graph, st
 
 void Planner::optimize_traffic_based_on_order(std::vector<uint> ranking, 
 std::vector<std::vector<uint>>& solution, std::vector<std::set<int>>& interacted_agents){
-
   std::cout<< "Optimizing traffic based on BFS order..." << std::endl;
   traffic_map.reset();
   traffic_map.initialize_traffic_map(solution);
   // traffic_map.export_traffic_map_csv("old_traffic_map.csv");
   std::vector<std::vector<uint>> revised_path = solution;
-  int times = 1000; 
+  int times = 1; 
   while (times > 0 ){
     std::vector<bool> visited(N, false);
     std::vector<int> bfs_order = {};
@@ -275,12 +276,13 @@ void Planner::optimize_traffic_based_on_order(std::vector<int>& bfs_order,
   std::vector<std::vector<uint>>& solution ) {
   // This function optimizes the traffic map based on the current order of agents.
   // It updates the edge weights in the traffic map according to the current order.
-  std::cout<< "Optimizing traffic based on BFS order..." << std::endl;
+  // std::cout<< "Optimizing traffic based on BFS order..." << std::endl;
   traffic_map.reset();
   traffic_map.initialize_traffic_map(solution);
   // traffic_map.export_traffic_map_csv("old_traffic_map.csv");
   std::vector<std::vector<uint>> revised_path = solution;
-  int times = 1000; 
+  std::shuffle(bfs_order.begin(), bfs_order.end(), *MT);
+  int times = 10; 
   while (times > 0 ){
     for (size_t i = 0; i < bfs_order.size(); ++i) {
       int agent_id = bfs_order[i];
@@ -294,11 +296,13 @@ void Planner::optimize_traffic_based_on_order(std::vector<int>& bfs_order,
       revised_path[agent_id] = path;
       // update the edge weights in the traffic map
     } 
-    std::shuffle(bfs_order.begin(), bfs_order.end(), *MT);
+    // std::shuffle(bfs_order.begin(), bfs_order.end(), *MT);
     times --;
   } 
+  // std::cout<< "Finished traffic based on BFS order..." << std::endl;
   // traffic_map.reset();
   // traffic_map.initialize_traffic_map(revised_path);
+    // guidance_heuristic.initialized = false;
   guidance_heuristic.set_gudiance_path(revised_path);
   // export_revised_path(revised_path, "revised_path_3.csv");
   // traffic_map.export_traffic_map_csv("revised_traffic_map4.csv");
@@ -780,8 +784,9 @@ void Planner::learning_Q_value(HNode* input_H_goal, double is_goal){
   
 }
 void Planner::increase_traffic_based_on_solution(HNode* input_H_goal) {
+    // std::cout<< "Increasing traffic map based on solution" << std::endl;
     guidance_heuristic.initialized = true;
-    // traffic_map.reset();
+    traffic_map.reset();
     HNode* current = input_H_goal;
     std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
     for (uint i = 0; i < N; ++i) {
@@ -797,26 +802,93 @@ void Planner::increase_traffic_based_on_solution(HNode* input_H_goal) {
       }
       current = current->parent;
     }
-
     for (uint i = 0; i < N; ++i) {
       solution_nodes[i].push_back(ins->starts[i]->index);
       std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
     }
     for(auto solution : solution_nodes){
-      // traffic_map.add_incremental_flow_path(solution); 
-      traffic_map.add_path(solution);
+      traffic_map.add_incremental_flow_path(solution); 
     }
-    // traffic_map.record_incremental_flow();
+    traffic_map.record_incremental_flow();
+    
+
     // traffic_map.print_incremental_flow("incremental_flow.csv");
     guidance_heuristic.reset(ins);
+    // std::cout<<"finishing increasing traffic map" << std::endl;
+}
+
+
+void Planner::increase_time_dependent_traffic_based_on_solution(HNode* input_H_goal) {
+    guidance_heuristic.initialized = true;
+    for(uint t = 0; t < time_bucket_size; t++){
+      time_period_traffic_map[t].reset();
+    }
+    int solution_makespan =  input_H_goal->current_make_span +1 ;
+    HNode* current = input_H_goal;
+    std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
+    for (uint i = 0; i < N; ++i) {
+      solution_nodes[i].push_back(input_H_goal->C[i]->index);
+    }
+    while (current->parent != nullptr) {
+      for(uint i = 0; i < N; ++i) {
+        if(solution_nodes[i].size() == 1 
+        && current->C[i]->index == input_H_goal->C[i]->index){
+          continue; // skip if already at goal
+        }
+        solution_nodes[i].push_back(current->C[i]->index);
+      }
+      current = current->parent;
+    }
+    for (uint i = 0; i < N; ++i) {
+      solution_nodes[i].push_back(ins->starts[i]->index);
+      std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
+    }
+    if(best_makespan == 0){
+      best_makespan = solution_makespan * 2;
+      // max_time_period = best_makespan/time_bucket_size;
+      // max_time_period = static_cast<int>(std::ceil(static_cast<double>(best_makespan) / time_bucket_size));
+      max_time_period = static_cast<int>(std::ceil(static_cast<double>(best_makespan) / time_bucket_size)); 
+      if(max_time_period < 1){
+        max_time_period = 1;
+      }
+      // std::cout<<"Initial max time period: " << best_makespan << std::endl;
+    }
+
+    for(auto solution : solution_nodes){
+      for(uint t = 0; t < time_bucket_size; t++){
+        uint start_index = t * max_time_period;
+        time_period_traffic_map[t].add_incremental_flow_path_from_time_index(solution,  start_index);
+      }
+    }
+    for(uint t = 0; t < time_bucket_size; t++){
+      time_period_traffic_map[t].record_incremental_flow();
+    }
+    
+    current_time_bucket = 0;
+    // traffic_map.print_incremental_flow("incremental_flow.csv");
+    guidance_heuristic.reset(ins);
+    guidance_heuristic.set_traffic_map(&time_period_traffic_map[current_time_bucket]);
     // std::cout<<"finishing increasing traffic map" << std::endl;
 }
 
 void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
   
   // build_dependence_graph(input_H_goal);
-    increase_traffic_based_on_solution(input_H_goal);
 
+
+  
+  if(is_goal){
+    // std::cout<< input_H_goal->current_make_span<< std::endl; 
+    // std::cout<<"Increasing weight map based on solution" << std::endl;
+    // traffic_map.print_incremental_flow("flow" + std::to_string(solution_count) + ".csv");
+    export_solution_from_HNode(input_H_goal, "solution_time_dependent" + std::to_string(solution_count) + ".csv");
+    // std::cout<<"Exporting solution to solution" + std::to_string(solution_count) + ".csv" << std::endl;
+    solution_count++;
+  }else{
+    // std::cout<<"Increasing weight map based on partial solution" << std::endl;
+  }
+  increase_time_dependent_traffic_based_on_solution(input_H_goal);
+  // increase_traffic_based_on_solution(input_H_goal);
   
   // learning_Q_value(input_H_goal,is_goal);
 
@@ -1093,7 +1165,9 @@ void Planner::export_solution_from_HNode(HNode* goal, const std::string& filenam
 
 Solution Planner::backpropagate_solve(std::string& additional_info)
 {
+  solution_count = 0;
   order_updated_times = 0 ;
+  best_makespan = 0;
   node_visit_times = 1;
   uint node_id = 1;
   // setup agents
@@ -1113,6 +1187,7 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
   SOLUTION_NODES = std::vector<HNode*>();
   // insert initial node, 'H': high-level node
   auto H_init = new HNode(ins->starts, D, nullptr, 0, get_h_value(ins->starts));
+  H_init->setMakeSpan(0);
   punishment_vector.clear();
   // highlevel_node_id ++; 
   // std::cout<< *H_init << std::endl;
@@ -1189,9 +1264,8 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       // export_solution_from_HNode(H, "solution_" + std::to_string(restart_cnt) + ".csv");
       restart_cnt++;
       backpropagate_order(H);
-      increase_weight_map(H,true);
+      increase_weight_map(H,false);
       pick_restart_nodes(OPEN);
-      // std::cout<< "restarting search" << std::endl;
       continue;
     }
 
@@ -1208,9 +1282,22 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       // export_solution_from_HNode(H, "current_solution.csv");
       continue;
     }
-
-    
-
+    if(guidance_heuristic.initialized != false){
+      if(time_bucket_size != 1){
+        uint traffic_index = H->current_make_span  / max_time_period  ;
+        if( traffic_index != current_time_bucket){
+          // set traffic based on time period;
+          current_time_bucket = traffic_index;
+          if(current_time_bucket > time_bucket_size -1){
+            std::cout<< current_time_bucket << " " << time_bucket_size << std::endl;
+            std::cout<< "Warning: current time bucket exceeds limit, setting to max" << std::endl;
+          }
+          guidance_heuristic.set_traffic_map(&time_period_traffic_map[current_time_bucket]);
+          guidance_heuristic.reset(ins);
+          // std::cout<< "Updating traffic map to time bucket: " << current_time_bucket << std::endl;
+        }
+      }
+    }
     // create successors at the low-level search
     auto L = H->search_tree.front();
     H->search_tree.pop();
@@ -1261,6 +1348,7 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
       H_new->setNodeID(node_id);
       node_id++;
       H_new->set_visit_times(node_visit_times);
+      H_new->setMakeSpan(H->current_make_span + 1);
       // if (H_goal == nullptr || H_new->f < H_goal->f) 
       OPEN.push(H_new);
       if(verbose == 3){
@@ -4512,11 +4600,19 @@ bool Planner::funcPIBT(Agent* ai)
                 D.get(i, u) + tie_breakers[u->id];
               });
   }else{
+    // std::cout<< "Using guidance heuristic to sort actions for agent: "<< i << std::endl;
       std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
             [&](Vertex* const v, Vertex* const u) {
               return guidance_heuristic.get_Astar_heuristic(i, v->id) + tie_breakers[v->id] <
               guidance_heuristic.get_Astar_heuristic(i, u->id) + tie_breakers[u->id];
             });
+
+      // std::cout<< "hererererer"<<std::endl;
+      // std::sort(C_next[i].begin(), C_next[i].begin() + K + 1,
+      // [&](Vertex* const v, Vertex* const u) {
+      //   return guidance_heuristic.get_heuristic(i, v->index) + tie_breakers[v->id] <
+      //   guidance_heuristic.get_heuristic(i, u->index) + tie_breakers[u->id];
+      // });
   }
 
   // if(!guidance_heuristic.initialized){

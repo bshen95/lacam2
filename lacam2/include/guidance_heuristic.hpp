@@ -52,6 +52,10 @@ public:
     }
 
 
+    void set_traffic_map(const TrafficMap* _traffic_map){
+        traffic_map = _traffic_map;
+    }
+
     void setup(const Instance* ins)
     {
         OPEN.resize(ins->N);
@@ -107,7 +111,7 @@ public:
                 uint n = neighbor->id;
                 if (V_Node_table[i][n].expanded) continue;
                 auto t0 = traffic_map->get_incremental_traffic_cost(curr->v->index, neighbor->index);
-                double tentative_g = curr->g + std::max(1, t0);
+                double tentative_g = curr->g + std::max(1.0, t0);
                 // auto [t0, t1] = traffic_map->get_traffic_cost(curr->v->index, neighbor->index);
                 // double tentative_g = curr->g + std::max(1, t0 + t1);
                 

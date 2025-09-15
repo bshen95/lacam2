@@ -229,7 +229,13 @@
    DistTable D;
    AstarDistTable PIBT_D;
 
+   uint time_bucket_size = 20; // Time bucket size for time-period based traffic maps
+   uint current_time_bucket = 0;
+   uint max_time_period = 20; // Maximum time period for traffic maps
+
    TrafficMap traffic_map ; // Traffic map for A* search
+   std::vector<TrafficMap> time_period_traffic_map; // Time-period based traffic maps for A* search
+
    ModifiedAstar astar_search; // A* search for traffic path finding
    GuidanceHeuristic guidance_heuristic; // Guidance heuristic for pathfinding
    std::vector<QTable> Q_tables; // Q-tables for each agent
@@ -267,8 +273,8 @@
    std::vector<HNode*> SOLUTION_NODES;
    
    std::vector<std::vector<std::array<Vertex*, 5>>> action_history;
-
-
+   uint solution_count = 0;
+   uint best_makespan = std::numeric_limits<uint>::max();
    bool reset_congestion_map = false;
    Planner(const Instance* _ins, const Deadline* _deadline, std::mt19937* _MT,
            const int _verbose = 0,
@@ -320,8 +326,10 @@
   void bfs_ordering(int node, const std::vector<std::set<int>>& graph, std::vector<bool>& visited, std::vector<int>& result);
   void export_revised_path(const std::vector<std::vector<uint>>& revised_path, const std::string& filename);
 
+  
   void build_dependence_graph(HNode* input_H_goal);
   void increase_traffic_based_on_solution(HNode* input_H_goal);
+  void increase_time_dependent_traffic_based_on_solution(HNode* input_H_goal);
   void backpropagate_order(HNode* H_goal);
   void decay_punishment();
 
@@ -388,6 +396,7 @@
   void learning_Q_value(HNode* input_H_goal,double is_goal);
   void set_individual_congestion_map(HNode* H_init);
 
+  
   void optimize_traffic_based_on_order(std::vector<uint> ranking, 
 std::vector<std::vector<uint>>& solution, std::vector<std::set<int>>& interacted_agents);
 
