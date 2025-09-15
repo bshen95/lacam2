@@ -139,87 +139,87 @@ void Planner::propagate_order_to_neighbors(HNode* current_node) {
 }
 
 void Planner::build_dependence_graph(HNode* input_H_goal) {
-  if(input_H_goal->h != 0){
-    return;
-  }
-  std::vector<double> agent_cost(N, 0);
-  std::vector<double> agent_ratio(N, 0);
-  HNode* current = input_H_goal;
-  std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
-  for (uint i = 0; i < N; ++i) {
-    solution_nodes[i].push_back(input_H_goal->C[i]->index);
-  }
-
-  while (current->parent != nullptr) {
-    get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
-    for(uint i = 0; i < N; ++i) {
-      if(solution_nodes[i].size() == 1 
-      && current->C[i]->index == input_H_goal->C[i]->index){
-        continue; // skip if already at goal
-      }
-      solution_nodes[i].push_back(current->C[i]->index);
-    }
-    current = current->parent;
-  }
-
-  for (uint i = 0; i < N; ++i) {
-    solution_nodes[i].push_back(ins->starts[i]->index);
-    std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
-    agent_ratio[i] = agent_cost[i] / (D.get(i, ins->starts[i]) - D.get(i, input_H_goal->C[i]));
-  }
-
-  std::vector<uint> ranking(N);
-  std::iota(ranking.begin(), ranking.end(), 0);
-  std::sort(ranking.begin(), ranking.end(), [&](uint i, uint j) {
-      return agent_ratio[i] > agent_ratio[j];
-  });
-
-  std::map<std::tuple<int, int>, int> occupancy_map;
-  // Suppose you have: std::vector<std::vector<int>> solution_nodes; // [agent][time] = vertex_index
-  for (int agent_id = 0; agent_id < N; ++agent_id) {
-      for (int t = 0; t < solution_nodes[agent_id].size(); ++t) {
-          int vertex_index = solution_nodes[agent_id][t];
-          occupancy_map[{vertex_index, t}] = agent_id;
-      }
-  }
-
-  std::vector<std::set<int>> interacted_agents(N);
-  for (auto agent_id : ranking) {
-    // process agent_id in order of decreasing agent_ratio
-    for (size_t j = 0; j < solution_nodes[agent_id].size() - 1; ++j) {
-      Vertex* from_v = ins->G.U[solution_nodes[agent_id][j]];
-      Vertex* to_v = ins->G.U[solution_nodes[agent_id][j + 1]];
-      int current_time_step = j; // Assuming j starts from 0, so +1 for time step
-
-      // TODO::Due to swap option, sometimes there could be no cached operation. 
-      // TODO:: Skip this case for now. 
-      if(action_history[agent_id][from_v->index][0] == nullptr) continue;
-      for(auto vertex : action_history[agent_id][from_v->index] ){
-        if(vertex->index == to_v->index) break; // skip if already at the next vertex
-        auto edge = std::make_pair(vertex->index, current_time_step + 1);
-        if(occupancy_map.find(edge) != occupancy_map.end()){
-          if(occupancy_map[edge] != agent_id){
-            interacted_agents[agent_id].insert(occupancy_map[edge]);
-          }
-        }
-      }
-    }
-  }
-  // std::vector<bool> visited(N, false);
-  // std::vector<std::vector<int>> depth_clustered_agents;
-  // for(auto rank : ranking){
-  //   if(visited[rank]) continue; // skip if already visited
-  //   depth_clustered_agents.push_back(depth_cluster(interacted_agents, rank, 1, visited));
+  // if(input_H_goal->h != 0){
+  //   return;
   // }
-  // export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
-  // export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
-  std::vector<bool> visited(N, false);
-  std::vector<int> bfs_order = {};
-  for(auto rank : ranking){
-    if(visited[rank]) continue;
-    bfs_ordering(rank, interacted_agents, visited, bfs_order);
-  }
-  optimize_traffic_based_on_order(bfs_order, solution_nodes);
+  // std::vector<double> agent_cost(N, 0);
+  // std::vector<double> agent_ratio(N, 0);
+  // HNode* current = input_H_goal;
+  // std::vector<std::vector<uint>> solution_nodes = std::vector<std::vector<uint>>(N);
+  // for (uint i = 0; i < N; ++i) {
+  //   solution_nodes[i].push_back(input_H_goal->C[i]->index);
+  // }
+
+  // while (current->parent != nullptr) {
+  //   get_edge_cost_per_agent(agent_cost,current->C,current->parent->C);
+  //   for(uint i = 0; i < N; ++i) {
+  //     if(solution_nodes[i].size() == 1 
+  //     && current->C[i]->index == input_H_goal->C[i]->index){
+  //       continue; // skip if already at goal
+  //     }
+  //     solution_nodes[i].push_back(current->C[i]->index);
+  //   }
+  //   current = current->parent;
+  // }
+
+  // for (uint i = 0; i < N; ++i) {
+  //   solution_nodes[i].push_back(ins->starts[i]->index);
+  //   std::reverse(solution_nodes[i].begin(), solution_nodes[i].end());
+  //   agent_ratio[i] = agent_cost[i] / (D.get(i, ins->starts[i]) - D.get(i, input_H_goal->C[i]));
+  // }
+
+  // std::vector<uint> ranking(N);
+  // std::iota(ranking.begin(), ranking.end(), 0);
+  // std::sort(ranking.begin(), ranking.end(), [&](uint i, uint j) {
+  //     return agent_ratio[i] > agent_ratio[j];
+  // });
+
+  // std::map<std::tuple<int, int>, int> occupancy_map;
+  // // Suppose you have: std::vector<std::vector<int>> solution_nodes; // [agent][time] = vertex_index
+  // for (int agent_id = 0; agent_id < N; ++agent_id) {
+  //     for (int t = 0; t < solution_nodes[agent_id].size(); ++t) {
+  //         int vertex_index = solution_nodes[agent_id][t];
+  //         occupancy_map[{vertex_index, t}] = agent_id;
+  //     }
+  // }
+
+  // std::vector<std::set<int>> interacted_agents(N);
+  // for (auto agent_id : ranking) {
+  //   // process agent_id in order of decreasing agent_ratio
+  //   for (size_t j = 0; j < solution_nodes[agent_id].size() - 1; ++j) {
+  //     Vertex* from_v = ins->G.U[solution_nodes[agent_id][j]];
+  //     Vertex* to_v = ins->G.U[solution_nodes[agent_id][j + 1]];
+  //     int current_time_step = j; // Assuming j starts from 0, so +1 for time step
+
+  //     // TODO::Due to swap option, sometimes there could be no cached operation. 
+  //     // TODO:: Skip this case for now. 
+  //     if(action_history[agent_id][from_v->index][0] == nullptr) continue;
+  //     for(auto vertex : action_history[agent_id][from_v->index] ){
+  //       if(vertex->index == to_v->index) break; // skip if already at the next vertex
+  //       auto edge = std::make_pair(vertex->index, current_time_step + 1);
+  //       if(occupancy_map.find(edge) != occupancy_map.end()){
+  //         if(occupancy_map[edge] != agent_id){
+  //           interacted_agents[agent_id].insert(occupancy_map[edge]);
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
+  // // std::vector<bool> visited(N, false);
+  // // std::vector<std::vector<int>> depth_clustered_agents;
+  // // for(auto rank : ranking){
+  // //   if(visited[rank]) continue; // skip if already visited
+  // //   depth_clustered_agents.push_back(depth_cluster(interacted_agents, rank, 1, visited));
+  // // }
+  // // export_interacted_agents_graph(interacted_agents, "interacted_agents.csv");
+  // // export_cluster_solution(solution_nodes, depth_clustered_agents, "clustered_solution.csv");
+  // std::vector<bool> visited(N, false);
+  // std::vector<int> bfs_order = {};
+  // for(auto rank : ranking){
+  //   if(visited[rank]) continue;
+  //   bfs_ordering(rank, interacted_agents, visited, bfs_order);
+  // }
+  // optimize_traffic_based_on_order(bfs_order, solution_nodes);
   // optimize_traffic_based_on_order(ranking, solution_nodes, interacted_agents);
 }
 
@@ -877,16 +877,16 @@ void Planner::increase_weight_map(HNode* input_H_goal, bool is_goal){
 
 
   
-  if(is_goal){
-    // std::cout<< input_H_goal->current_make_span<< std::endl; 
-    // std::cout<<"Increasing weight map based on solution" << std::endl;
-    // traffic_map.print_incremental_flow("flow" + std::to_string(solution_count) + ".csv");
-    export_solution_from_HNode(input_H_goal, "solution_time_dependent" + std::to_string(solution_count) + ".csv");
-    // std::cout<<"Exporting solution to solution" + std::to_string(solution_count) + ".csv" << std::endl;
-    solution_count++;
-  }else{
-    // std::cout<<"Increasing weight map based on partial solution" << std::endl;
-  }
+  // if(is_goal){
+  //   // std::cout<< input_H_goal->current_make_span<< std::endl; 
+  //   // std::cout<<"Increasing weight map based on solution" << std::endl;
+  //   // traffic_map.print_incremental_flow("flow" + std::to_string(solution_count) + ".csv");
+  //   export_solution_from_HNode(input_H_goal, "solution_time_dependent" + std::to_string(solution_count) + ".csv");
+  //   // std::cout<<"Exporting solution to solution" + std::to_string(solution_count) + ".csv" << std::endl;
+  //   solution_count++;
+  // }else{
+  //   // std::cout<<"Increasing weight map based on partial solution" << std::endl;
+  // }
   increase_time_dependent_traffic_based_on_solution(input_H_goal);
   // increase_traffic_based_on_solution(input_H_goal);
   
@@ -1173,11 +1173,6 @@ Solution Planner::backpropagate_solve(std::string& additional_info)
   // setup agents
   for (auto i = 0; i < N; ++i) A[i] = new Agent(i);
   // use action history to record the actions taken by each agent
-  action_history = std::vector<std::vector<std::array<Vertex*, 5>>>(
-      N, std::vector<std::array<Vertex*, 5>>(
-          ins->G.U.size(), std::array<Vertex*, 5>{}
-      )
-  );
 
   guidance_heuristic.setup(ins);
 
@@ -4624,7 +4619,7 @@ bool Planner::funcPIBT(Agent* ai)
   //           return D.get(i, v) + tie_breakers[v->id] <
   //           D.get(i, u) + tie_breakers[u->id];
   //         });
-  action_history[ai->id][ai->v_now->index] = C_next[i];  // record the action order;
+  // action_history[ai->id][ai->v_now->index] = C_next[i];  // record the action order;
   
 
   Agent* swap_agent = swap_possible_and_required(ai);

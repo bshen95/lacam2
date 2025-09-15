@@ -272,7 +272,7 @@
    std::vector<std::unordered_map<std::pair<int, int>, double, PairHash>> individual_transition_frequency;
    std::vector<HNode*> SOLUTION_NODES;
    
-   std::vector<std::vector<std::array<Vertex*, 5>>> action_history;
+  //  std::vector<std::vector<std::array<Vertex*, 5>>> action_history;
    uint solution_count = 0;
    uint best_makespan = std::numeric_limits<uint>::max();
    bool reset_congestion_map = false;
